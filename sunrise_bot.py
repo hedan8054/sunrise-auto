@@ -194,6 +194,11 @@ def calc_score(vals, cloud_base_m, cfg):
     lo, hi = cfg["dewpoint_diff"]
     pt = 2 if dp >= hi else 1 if dp >= lo else 0
     detail.append(("露点差°C", dp, pt)); total += pt
+    # 降雨量 mm/h
+    p = vals.get("precip", 0)
+    lo, hi = cfg["precip_mm"]
+    pt = 2 if p < lo else 1 if p < hi else 0
+    detail.append(("降雨量mm", p, pt)); total += pt
 
     return total, detail
 
@@ -220,6 +225,7 @@ def gen_scene_desc(score5, kv, sun_t):
     vis  = kv.get("能见度km", None) or 0
     wind = kv.get("风速m/s",  None) or 0
     dp   = kv.get("露点差°C", None) or 0
+    rp   = kv.get("降雨量mm", None) or 0
 
     # 低云判断
     if lc < 20:
@@ -266,6 +272,14 @@ def gen_scene_desc(score5, kv, sun_t):
         dp_txt = "露点差小于3℃，有些潮湿，镜头可能结露"
     else:
         dp_txt = "露点差很小，注意海雾/镜头起雾风险"
+      
+    # 降雨
+    if rp < 0.1:
+        rain_txt = "几乎不会下雨"
+    elif rp < 1:
+        rain_txt = "可能有零星小雨/毛毛雨"
+    else:
+        rain_txt = "有下雨可能，注意防水和收纳镜头"  
 
     # 评分等级文字
     if score5 >= 4.0:
@@ -286,10 +300,11 @@ def gen_scene_desc(score5, kv, sun_t):
         f"- 彩云/火烧云：{fire}\n"
         f"- {vis_txt}\n"
         f"- {wind_txt}\n"
+        f"- 降雨：{rain_txt}\n"
         f"- {dp_txt}"
     )
 # ----------------- 三个模式 -----------------
-def run_forecast():
+def ):
     sun_exact, sun_hour = sunrise_time()
     om = open_meteo()
     if om is None:
@@ -318,7 +333,8 @@ def run_forecast():
         vis  = om["hourly"]["visibility"][idx],
         t    = om["hourly"]["temperature_2m"][idx],
         td   = om["hourly"]["dewpoint_2m"][idx],
-        wind = om["hourly"]["windspeed_10m"][idx]
+        wind   = om["hourly"]["windspeed_10m"][idx],
+        precip = om["hourly"]["precipitation"][idx]
     )
 
     mtxt = metar("ZGSZ")
@@ -326,7 +342,7 @@ def run_forecast():
 
     total, det = calc_score(vals, cb, CONFIG["scoring"])
     # 5分制评分 & 场景描述
-    score5 = round(total / 18 * 5, 1)
+    score5 = round(total / (3 * len(det)) * 5, 1)
     kv = {k: v for k, v, _ in det}
     scene_txt = gen_scene_desc(score5, kv, sun_exact)
     text = scene_txt + "\n\n" + build_forecast_text(total, det, sun_exact, extra={})
