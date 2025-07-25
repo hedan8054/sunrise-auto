@@ -304,7 +304,7 @@ def gen_scene_desc(score5, kv, sun_t):
         f"- {dp_txt}"
     )
 # ----------------- 三个模式 -----------------
-def ):
+def run_forecast():
     sun_exact, sun_hour = sunrise_time()
     om = open_meteo()
     if om is None:
