@@ -118,9 +118,11 @@ def sunrise_time():
     return t_exact, t_hour
 
 def fetch_himawari_frames(n=6, step=10):
-    """抓取最近 n 帧 Himawari PNG
-    - 向下取整到 step 分钟（默认 10 分钟）
-    - 先尝试 NICT 官方源，失败再试 RAMMB 缓存
+    """
+    抓取最近 n 帧 Himawari PNG。
+    - 时间向下取整到 step 分钟
+    - 依次尝试多个镜像（Himawari-9/8、第三方缓存）
+    - 关闭证书校验，尽量不报 SSL 错
     """
     if not USE_CLOUDWALL:
         return []
@@ -129,45 +131,41 @@ def fetch_himawari_frames(n=6, step=10):
         return t.replace(minute=(t.minute // base) * base, second=0, microsecond=0)
 
     frames = []
-    base = now().astimezone(pytz.UTC)   # Himawari 时间用 UTC 更稳
+    base_utc = now().astimezone(pytz.UTC)
     for i in range(n):
-        t_utc = floor_minutes(base - dt.timedelta(minutes=step * i), step)
+        t_utc = floor_minutes(base_utc - dt.timedelta(minutes=step * i), step)
+        d = t_utc.strftime("%Y%m%d")
+        hm = t_utc.strftime("%H%M")
+        H  = t_utc.strftime("%H")
+        M  = t_utc.strftime("%M")
 
-        # URL 列表（依次尝试）
-        candidates = [
-            # NICT 官方(2km/px, 550px tile)
-            "https://himawari8.nict.go.jp/img/D531106/2d/550/{date}/{time}00_0_0.png",
-            # RAMMB Slider（全盘 GeoColor 真实彩图）
-            "https://rammb-slider.cira.colostate.edu/data/imagery/Himawari-9/Full_Disk/GeoColor/{date}/{hour}/{minute}/000_000.png"
+        # 候选 URL（顺序很重要）
+        urls = [
+            f"https://himawari9.nict.go.jp/img/D531106/2d/550/{d}/{hm}00_0_0.png",
+            f"https://himawari8.nict.go.jp/img/D531106/2d/550/{d}/{hm}00_0_0.png",
+            f"https://www.himawari-8.com/data/23/WL/550/{d}/{hm}00_0_0.png",
+            f"https://rammb-slider.cira.colostate.edu/data/imagery/Himawari-9/Full_Disk/GeoColor/{d}/{H}/{M}/000_000.png",
         ]
 
-        ok = False
-        for u in candidates:
-            url = u.format(
-                date=t_utc.strftime("%Y%m%d"),
-                time=t_utc.strftime("%H%M"),
-                hour=t_utc.strftime("%H"),
-                minute=t_utc.strftime("%M")
-            )
+        success = False
+        for url in urls:
             try:
-                r = requests.get(url, timeout=30, verify=False)
+                r = requests.get(url, timeout=25, verify=False)
                 if r.status_code == 200:
                     arr = np.frombuffer(r.content, np.uint8)
                     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
                     if img is not None:
                         frames.append((t_utc, img))
-                        ok = True
+                        success = True
                         break
-            except Exception as e:
-                # 继续试下一个源
+            except Exception:
                 pass
 
-        if not ok:
-            print(f"[WARN] 卫星帧获取失败: {t_utc.isoformat()} (尝试了{len(candidates)}个源)")
+        if not success:
+            print(f"[WARN] 卫星帧获取失败: {t_utc.isoformat()}  (尝试 {len(urls)} 个源)")
 
     frames.sort(key=lambda x: x[0])
     return frames
-
 # ----------------- 评分逻辑 -----------------
 def score_value(v, bounds):
     """
