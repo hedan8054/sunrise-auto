@@ -22,3 +22,15 @@ cloudwall:
 paths:
   log_scores: "logs/scores_%Y-%m.csv"
   log_cloud:  "logs/cloudwall_%Y-%m.csv"
+  
+cloudbase_estimate:
+  default_coef_m_per_deg: 125        # 默认 125 m/℃（≈400 ft/℃）
+  min_samples: 10                    # 至少多少条样本才触发自动校准
+  max_window_days: 45                # 回溯多少天的数据做校准
+  clip_min: 60                       # 系数下限，避免异常值（单位 m/℃）
+  clip_max: 200                      # 系数上限
+
+paths:
+  log_scores: "logs/scores_%Y-%m.csv"
+  log_cloud:  "logs/cloud_%Y-%m.csv"
+  log_calib:  "logs/calib_%Y-%m.csv"   # 新增：记录每次校准结果
