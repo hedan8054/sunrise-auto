@@ -1,0 +1,6 @@
+requests
+pandas
+PyYAML
+pytz
+opencv-python
+numpy
