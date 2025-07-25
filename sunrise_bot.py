@@ -219,69 +219,109 @@ def build_forecast_text(total, det, sun_t, extra):
         lines.append("\n提示：" + extra["note"])
     return "\n".join(lines)
 def gen_scene_desc(score5, kv, sun_t):
-    """根据主要指标生成普通人可读描述（5分制，保留1位小数）"""
-    lc   = kv.get("低云%",  None) or 0
-    mh   = kv.get("中/高云%", None) or 0
-    vis  = kv.get("能见度km", None) or 0
-    wind = kv.get("风速m/s",  None) or 0
-    dp   = kv.get("露点差°C", None) or 0
-    rp   = kv.get("降雨量mm", None) or 0
+    """根据主要指标生成普通人可读描述（5分制，保留1位小数），并给出每个指标的“级别+画面感”"""
+    lc   = kv.get("低云%",      0) or 0
+    mh   = kv.get("中/高云%",    0) or 0
+    cb   = kv.get("云底高度m",   -1)
+    vis  = kv.get("能见度km",    0) or 0
+    wind = kv.get("风速m/s",     0) or 0
+    dp   = kv.get("露点差°C",    0) or 0
+    rp   = kv.get("降雨量mm",    0) or 0
 
-    # 低云判断
+    # ===== 低云 =====
     if lc < 20:
-        low_text = "地平线基本通透"
+        lc_level = "低"
+        low_text = "地平线基本通透，太阳能“蹦”出来"
     elif lc < 40:
-        low_text = "地平线可能有一条薄薄的灰带"
+        lc_level = "中"
+        low_text = "地平线可能有一条灰带，太阳或从缝隙钻出"
     elif lc < 60:
-        low_text = "低云偏多，太阳可能要从云缝里钻出来"
+        lc_level = "偏高"
+        low_text = "低云偏多，首轮日光可能被挡一部分"
     else:
-        low_text = "低云很厚，日出被挡住的概率较高"
+        lc_level = "高"
+        low_text = "一堵低云墙，首轮日光大概率看不到"
 
-    # 火烧云概率（依据中/高云）
+    # ===== 中/高云（决定彩云/火烧云）=====
     if 20 <= mh <= 60:
-        fire = "有机会出现被阳光染色的云层（小概率火烧云）"
-    elif 60 < mh <= 80:
-        fire = "云多且厚，颜色可能偏闷，火烧云概率不高"
+        mh_level = "适中"
+        fire_text = "有“云接光”舞台，可能染上粉橙色（小概率火烧云）"
     elif mh < 20:
-        fire = "天空太干净，基本不会有大面积彩云"
+        mh_level = "太少"
+        fire_text = "天空太干净，只有简单渐变色"
+    elif mh <= 80:
+        mh_level = "偏多"
+        fire_text = "云多且厚，色彩可能偏闷"
     else:
-        fire = "云层太厚，大概率灰闷"
+        mh_level = "很多"
+        fire_text = "厚云盖顶，大概率阴沉"
 
-    # 能见度
+    # ===== 云底高度 =====
+    if cb is None or cb < 0:
+        cb_level = "未知"
+        cb_text  = "云底数据缺失，凌晨再看卫星确认低云墙"
+        cb_show  = "未知"
+    elif cb > 1000:
+        cb_level = ">1000m"
+        cb_text  = "云底较高，多当“天花板”，不挡海平线"
+        cb_show  = f"{cb:.0f}m"
+    elif cb > 500:
+        cb_level = "500~1000m"
+        cb_text  = "可能在海面上方形成一道云棚，注意日出角度"
+        cb_show  = f"{cb:.0f}m"
+    else:
+        cb_level = "<500m"
+        cb_text  = "贴海低云/雾，像拉了窗帘"
+        cb_show  = f"{cb:.0f}m"
+
+    # ===== 能见度 =====
     if vis >= 15:
-        vis_txt = f"能见度约 {vis:.0f} km，空气透明度不错"
+        vis_level = ">15km"
+        vis_text  = "空气透明度好，远景清晰，金光反射漂亮"
     elif vis >= 8:
-        vis_txt = f"能见度 {vis:.0f} km，中等水平"
+        vis_level = "8~15km"
+        vis_text  = "中等透明度，远景略灰"
     else:
-        vis_txt = f"能见度只有 {vis:.0f} km，远景可能发灰"
+        vis_level = "<8km"
+        vis_text  = "背景灰蒙蒙，层次差"
 
-    # 风
+    # ===== 风速 =====
     if 2 <= wind <= 5:
-        wind_txt = f"风速 {wind:.1f} m/s，适合拍摄也不太冷"
+        wind_level = "2~5m/s"
+        wind_text  = "海面有微波纹，反光好，三脚架稳"
     elif wind < 2:
-        wind_txt = f"几乎无风（{wind:.1f} m/s），注意镜头容易结露"
+        wind_level = "<2m/s"
+        wind_text  = "几乎无风，注意镜头容易结露"
     elif wind <= 8:
-        wind_txt = f"风稍大（{wind:.1f} m/s），留意三脚架稳定性"
+        wind_level = "5~8m/s"
+        wind_text  = "风稍大，留意三脚架稳定性"
     else:
-        wind_txt = f"大风（{wind:.1f} m/s），拍摄体验不佳"
+        wind_level = ">8m/s"
+        wind_text  = "大风天，拍摄体验差，器材要护好"
 
-    # 露点差
+    # ===== 露点差 =====
     if dp >= 3:
-        dp_txt = "露点差≥3℃，起雾概率低"
+        dp_level = "≥3℃"
+        dp_text  = "不易起雾"
     elif dp >= 1:
-        dp_txt = "露点差小于3℃，有些潮湿，镜头可能结露"
+        dp_level = "1~3℃"
+        dp_text  = "稍潮，镜头可能结露"
     else:
-        dp_txt = "露点差很小，注意海雾/镜头起雾风险"
-      
-    # 降雨
-    if rp < 0.1:
-        rain_txt = "几乎不会下雨"
-    elif rp < 1:
-        rain_txt = "可能有零星小雨/毛毛雨"
-    else:
-        rain_txt = "有下雨可能，注意防水和收纳镜头"  
+        dp_level = "<1℃"
+        dp_text  = "极易起雾，注意海雾/镜头起雾风险"
 
-    # 评分等级文字
+    # ===== 降雨 =====
+    if rp < 0.1:
+        rp_level = "<0.1mm"
+        rain_text = "几乎不会下雨"
+    elif rp < 1:
+        rp_level = "0.1~1mm"
+        rain_text = "可能有零星小雨/毛毛雨"
+    else:
+        rp_level = "≥1mm"
+        rain_text = "有下雨可能，注意防水和收纳镜头"
+
+    # ===== 评分等级文字 =====
     if score5 >= 4.0:
         grade = "建议出发（把握较大）"
     elif score5 >= 3.0:
@@ -296,12 +336,13 @@ def gen_scene_desc(score5, kv, sun_t):
     return (
         f"【直观判断】评分：{score5:.1f}/5 —— {grade}\n"
         f"日出：{sun_t:%H:%M}\n"
-        f"- 低云：{low_text}\n"
-        f"- 彩云/火烧云：{fire}\n"
-        f"- {vis_txt}\n"
-        f"- {wind_txt}\n"
-        f"- 降雨：{rain_txt}\n"
-        f"- {dp_txt}"
+        f"- 低云：{lc:.0f}%（{lc_level}）— {low_text}\n"
+        f"- 中/高云：{mh:.0f}%（{mh_level}）— {fire_text}\n"
+        f"- 云底高度：{cb_show}（{cb_level}）— {cb_text}\n"
+        f"- 能见度：{vis:.1f} km（{vis_level}）— {vis_text}\n"
+        f"- 风速：{wind:.1f} m/s（{wind_level}）— {wind_text}\n"
+        f"- 降雨：{rp:.1f} mm（{rp_level}）— {rain_text}\n"
+        f"- 露点差：{dp:.1f} ℃（{dp_level}）— {dp_text}"
     )
 # ----------------- 三个模式 -----------------
 def run_forecast():
