@@ -1,0 +1,31 @@
+name: Sunrise Forecast
+
+on:
+  schedule:
+    - cron: '30 9 * * *'   # UTC 09:30 = 北京/台北 17:30
+  workflow_dispatch:
+
+jobs:
+  run-forecast:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run forecast
+        run: python sunrise_bot.py forecast
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: forecast_outputs
+          path: |
+            out/
+            logs/
