@@ -1,0 +1,24 @@
+name: Run Sunset Forecast
+
+on:
+  schedule:
+    - cron: '30 21 * * *'   # UTC 21:30 = 北京时间 05:30
+  workflow_dispatch:
+
+jobs:
+  run-sunset:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Run sunset forecast
+        run: python sunset_bot.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sunset_outputs
+          path: |
+            out/
+            logs/
