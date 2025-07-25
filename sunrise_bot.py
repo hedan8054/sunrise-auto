@@ -213,7 +213,81 @@ def build_forecast_text(total, det, sun_t, extra):
     if extra.get("note"):
         lines.append("\n提示：" + extra["note"])
     return "\n".join(lines)
+def gen_scene_desc(score5, kv, sun_t):
+    """根据主要指标生成普通人可读描述（5分制，保留1位小数）"""
+    lc   = kv.get("低云%",  None) or 0
+    mh   = kv.get("中/高云%", None) or 0
+    vis  = kv.get("能见度km", None) or 0
+    wind = kv.get("风速m/s",  None) or 0
+    dp   = kv.get("露点差°C", None) or 0
 
+    # 低云判断
+    if lc < 20:
+        low_text = "地平线基本通透"
+    elif lc < 40:
+        low_text = "地平线可能有一条薄薄的灰带"
+    elif lc < 60:
+        low_text = "低云偏多，太阳可能要从云缝里钻出来"
+    else:
+        low_text = "低云很厚，日出被挡住的概率较高"
+
+    # 火烧云概率（依据中/高云）
+    if 20 <= mh <= 60:
+        fire = "有机会出现被阳光染色的云层（小概率火烧云）"
+    elif 60 < mh <= 80:
+        fire = "云多且厚，颜色可能偏闷，火烧云概率不高"
+    elif mh < 20:
+        fire = "天空太干净，基本不会有大面积彩云"
+    else:
+        fire = "云层太厚，大概率灰闷"
+
+    # 能见度
+    if vis >= 15:
+        vis_txt = f"能见度约 {vis:.0f} km，空气透明度不错"
+    elif vis >= 8:
+        vis_txt = f"能见度 {vis:.0f} km，中等水平"
+    else:
+        vis_txt = f"能见度只有 {vis:.0f} km，远景可能发灰"
+
+    # 风
+    if 2 <= wind <= 5:
+        wind_txt = f"风速 {wind:.1f} m/s，适合拍摄也不太冷"
+    elif wind < 2:
+        wind_txt = f"几乎无风（{wind:.1f} m/s），注意镜头容易结露"
+    elif wind <= 8:
+        wind_txt = f"风稍大（{wind:.1f} m/s），留意三脚架稳定性"
+    else:
+        wind_txt = f"大风（{wind:.1f} m/s），拍摄体验不佳"
+
+    # 露点差
+    if dp >= 3:
+        dp_txt = "露点差≥3℃，起雾概率低"
+    elif dp >= 1:
+        dp_txt = "露点差小于3℃，有些潮湿，镜头可能结露"
+    else:
+        dp_txt = "露点差很小，注意海雾/镜头起雾风险"
+
+    # 评分等级文字
+    if score5 >= 4.0:
+        grade = "建议出发（把握较大）"
+    elif score5 >= 3.0:
+        grade = "可去一搏（不稳）"
+    elif score5 >= 2.0:
+        grade = "机会一般（看心情或距离）"
+    elif score5 >= 1.0:
+        grade = "概率很小（除非就在附近）"
+    else:
+        grade = "建议休息（基本无戏）"
+
+    return (
+        f"【直观判断】评分：{score5:.1f}/5 —— {grade}\n"
+        f"日出：{sun_t:%H:%M}\n"
+        f"- 低云：{low_text}\n"
+        f"- 彩云/火烧云：{fire}\n"
+        f"- {vis_txt}\n"
+        f"- {wind_txt}\n"
+        f"- {dp_txt}"
+    )
 # ----------------- 三个模式 -----------------
 def run_forecast():
     sun_exact, sun_hour = sunrise_time()
@@ -251,7 +325,11 @@ def run_forecast():
     cb = parse_cloud_base(mtxt)
 
     total, det = calc_score(vals, cb, CONFIG["scoring"])
-    text = build_forecast_text(total, det, sun_exact, extra={})
+    # 5分制评分 & 场景描述
+    score5 = round(total / 18 * 5, 1)
+    kv = {k: v for k, v, _ in det}
+    scene_txt = gen_scene_desc(score5, kv, sun_exact)
+    text = scene_txt + "\n\n" + build_forecast_text(total, det, sun_exact, extra={})
 
     print(text)
     save_report("forecast", text)
