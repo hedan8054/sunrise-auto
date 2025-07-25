@@ -4,13 +4,14 @@
 sunrise_bot.py （无卫星版）
 模式：
   python sunrise_bot.py forecast    # 下午预测（日出评分+文案）
-  python sunrise_bot.py nightcheck  # 22:00 夜检（记录低云墙指数-模型）
-  python sunrise_bot.py lastcheck   # 03:30 凌晨检（记录低云墙指数-模型）
+  python sunrise_bot.py nightcheck  # 22:00 夜检（记录低云墙指数-模型多点）
+  python sunrise_bot.py lastcheck   # 03:30 凌晨检（记录低云墙指数-模型多点）
 
 改动要点：
 - 完全移除 Himawari/卫星帧/OpenCV/cloudwall 依赖
-- “低云墙预警”用 meteoblue（有 key）或 open-meteo 的多点采样模型替代
-- 其他评分逻辑保持不变
+- “低云墙预警”用 meteoblue Point API（若有 key）+ open-meteo 多点采样替代
+- 样本打印时带上缺失原因（如 NA m[no_key] (mb)）
+- 样本 JSON 一并写入 CSV 便于后期排查
 """
 
 import os
@@ -36,7 +37,7 @@ CONFIG = yaml.safe_load(open("config.yaml", "r", encoding="utf-8"))
 LAT = CONFIG["location"]["lat"]
 LON = CONFIG["location"]["lon"]
 
-# 可选：meteoblue API key（放 GitHub Secrets 里）
+# 可选：meteoblue API key（放在 GitHub Secrets 里）
 MB_API_KEY = os.getenv("MB_API_KEY", "").strip()
 
 
@@ -80,7 +81,7 @@ def sunrise_time():
     return t_exact, t_hour
 
 
-# ----------------- open-meteo 读取 -----------------
+# ----------------- open-meteo -----------------
 def open_meteo(lat=None, lon=None):
     """获取 open-meteo 小时级数据，若失败返回 None"""
     lat = LAT if lat is None else lat
@@ -126,43 +127,63 @@ def parse_cloud_base(metar_txt):
     return ft * 0.3048
 
 
-# ----------------- meteoblue point API（可选） -----------------
+# ----------------- meteoblue Point API（可选） -----------------
 def mb_point_lowcloud(lat, lon, when_hour):
     """
     读取 meteoblue Point API 的低云覆盖率 & 云底高度
-    返回 dict: {"low_cloud": %, "cloud_base": m} 或 None
+    返回 dict:
+      {
+        "low_cloud": %,               # 低云覆盖率
+        "cloud_base": m or None,      # 云底高度
+        "low_reason": "ok"/"...",     # 低云缺失原因
+        "cb_reason": "ok"/"...",      # 云底缺失原因
+      } 或 None
     """
     if not MB_API_KEY:
         return None
     try:
-        # 这里以 basic-1h_basic-day 为例；请根据你的套餐调整 package 名称
+        # 示例套餐名，仅供参考；根据你的订阅调整
         url = ("https://my.meteoblue.com/packages/basic-1h_basic-day"
                f"?apikey={MB_API_KEY}&lat={lat:.4f}&lon={lon:.4f}"
                "&format=json&tz=Asia/Shanghai")
         js = requests.get(url, timeout=30).json()
-
-        # 找小时数据块
         data = js.get("data_1h") or js.get("data_hourly") or {}
         times = data.get("time") or data.get("time_local") or data.get("time_iso8601") or []
-        # 格式兼容：YYYY-MM-DD HH:00
         tgt = when_hour.strftime("%Y-%m-%d %H:00")
         if tgt not in times:
-            return None
+            return {
+                "low_cloud": None, "cloud_base": None,
+                "low_reason": "no_time", "cb_reason": "no_time"
+            }
+
         idx = times.index(tgt)
 
-        def pick(keys, default=None):
+        def pick(keys):
             for k in keys:
                 if k in data:
-                    return data[k][idx]
-            return default
+                    return data[k][idx], "ok"
+            return None, "no_key"
 
-        low  = pick(["low_clouds", "low_cloud_cover", "cloudcover_low"])
-        base = pick(["cloud_base", "cloudbase", "cloud_base_height"])
+        low, low_r = pick(["low_clouds", "low_cloud_cover", "cloudcover_low"])
+        cb,  cb_r  = pick(["cloud_base", "cloudbase", "cloud_base_height"])
 
-        return {"low_cloud": low, "cloud_base": base}
+        if low is None:
+            low_r = "null_val" if "low_clouds" in data or "low_cloud_cover" in data else low_r
+        if cb is None:
+            cb_r  = "null_val" if "cloud_base" in data or "cloudbase" in data else cb_r
+
+        return {
+            "low_cloud": low,
+            "cloud_base": cb,
+            "low_reason": low_r,
+            "cb_reason": cb_r
+        }
     except Exception as e:
         print("[WARN] meteoblue point API 失败：", e)
-        return None
+        return {
+            "low_cloud": None, "cloud_base": None,
+            "low_reason": "request_fail", "cb_reason": "request_fail"
+        }
 
 
 # ----------------- 距离/方位角 -> 经纬度 -----------------
@@ -178,13 +199,63 @@ def offset_latlon(lat, lon, bearing_deg, dist_km):
     return math.degrees(lat2), math.degrees(lon2)
 
 
-# ----------------- “低云墙预警”模型 -----------------
+# ----------------- “低云墙预警”多点模型 -----------------
+def fetch_sample_point(lat, lon, sun_hour):
+    """
+    优先 meteoblue，失败则 open-meteo。
+    返回一个 dict:
+      {
+        "dist": float,
+        "low": float or None,
+        "low_reason": str,
+        "cb": float or None,
+        "cb_reason": str,
+        "src": "mb"|"om"|"err"
+      }
+    """
+    # 先 meteoblue
+    if MB_API_KEY:
+        rec = mb_point_lowcloud(lat, lon, sun_hour)
+        if rec is not None:
+            return {
+                "low": rec["low_cloud"],
+                "low_reason": rec["low_reason"],
+                "cb": rec["cloud_base"],
+                "cb_reason": rec["cb_reason"],
+                "src": "mb"
+            }
+
+    # 再 open-meteo
+    om = open_meteo(lat, lon)
+    if om is None:
+        return {
+            "low": None, "low_reason": "request_fail",
+            "cb": None,  "cb_reason": "no_field_om",
+            "src": "err"
+        }
+    times = om["hourly"]["time"]
+    tgt = sun_hour.strftime("%Y-%m-%dT%H:00")
+    if tgt not in times:
+        idx = min(range(len(times)),
+                  key=lambda i: abs(dt.datetime.fromisoformat(times[i]) - sun_hour))
+    else:
+        idx = times.index(tgt)
+    low_pct = om["hourly"]["cloudcover_low"][idx]
+    # open-meteo 没有云底高度
+    return {
+        "low": low_pct,
+        "low_reason": "ok",
+        "cb": None,
+        "cb_reason": "no_field_om",
+        "src": "om"
+    }
+
+
 def fallback_cloudwall_model(sun_hour):
     """
     沿日出方向取多个距离点，读取低云覆盖率(必) + 云底高度(尽量)。
-    用规则模型给出风险等级：
-      2 = 预警；1 = 关注；0 = 正常
-    返回 (score, text)
+    规则模型给出风险等级： 2=预警；1=关注；0=正常
+    返回 (risk_score, risk_text, samples_list)
     """
     cfg = CONFIG.get("cloudwall", {})
     bearing = cfg.get("sunrise_azimuth", 90)
@@ -193,31 +264,13 @@ def fallback_cloudwall_model(sun_hour):
     samples = []
     for d in dists:
         plat, plon = offset_latlon(LAT, LON, bearing, d)
-        rec = mb_point_lowcloud(plat, plon, sun_hour)
-        if rec is None:
-            # 用 open-meteo 兜底
-            om = open_meteo(plat, plon)
-            if om is None:
-                samples.append((d, None, None))
-                continue
-            times = om["hourly"]["time"]
-            tgt = sun_hour.strftime("%Y-%m-%dT%H:00")
-            if tgt not in times:
-                idx = min(range(len(times)),
-                          key=lambda i: abs(dt.datetime.fromisoformat(times[i]) - sun_hour))
-            else:
-                idx = times.index(tgt)
-            low_pct = om["hourly"]["cloudcover_low"][idx]
-            base_m  = None
-        else:
-            low_pct = rec.get("low_cloud")
-            base_m  = rec.get("cloud_base")
-
-        samples.append((d, low_pct, base_m))
+        s = fetch_sample_point(plat, plon, sun_hour)
+        s["dist"] = d
+        samples.append(s)
 
     risk = model_lc_risk_v2(samples)
     txt  = risk_text_from_samples(risk, samples)
-    return risk, txt
+    return risk, txt, samples
 
 
 def model_lc_risk_v2(samples):
@@ -230,18 +283,29 @@ def model_lc_risk_v2(samples):
     """
     if not samples:
         return 1  # 无数据 → 关注
-    high = sum(1 for _, l, b in samples if (l is not None and l >= 50) and (b is None or b < 600))
-    mid  = sum(1 for _, l, b in samples if (l is not None and l >= 30) or (b is not None and b < 800))
+    high = sum(1 for s in samples
+               if (s["low"] is not None and s["low"] >= 50)
+               and (s["cb"] is None or s["cb"] < 600))
+    mid  = sum(1 for s in samples
+               if (s["low"] is not None and s["low"] >= 30)
+               or (s["cb"] is not None and s["cb"] < 800))
     if high >= 1 or mid >= len(samples) * 0.5:
         return 2
     if mid >= 1:
         return 1
     return 0
 
+
 def risk_text_from_samples(risk, samples):
-    stat = {0:"正常(模型)",1:"关注(模型)",2:"预警(模型)"}.get(risk,"?")
-    detail = " | ".join([f"{d}km:{(str(l)+'%') if l is not None else '?'} / {int(b) if b else 'NA'}m"
-                         for d,l,b in samples])
+    stat = {0: "正常(模型)", 1: "关注(模型)", 2: "预警(模型)"}.get(risk, "?")
+    def fmt(s):
+        low_str = f"{s['low']:.0f}%" if s["low"] is not None else f"NA[{s['low_reason']}]"
+        if s["cb"] is None:
+            cb_str = f"NA m[{s['cb_reason']}]"
+        else:
+            cb_str = f"{int(round(s['cb']))}m"
+        return f"{int(s['dist'])}km:{low_str} / {cb_str} ({s['src']})"
+    detail = " | ".join(fmt(s) for s in samples)
     return f"{stat}（samples: {detail}）"
 
 
@@ -449,7 +513,7 @@ RISK_MAP = {0: "正常", 1: "关注", 2: "高风险"}
 def run_forecast():
     sun_exact, sun_hour = sunrise_time()
 
-    # 1. 拿 open-meteo 主体数据（评分）
+    # 1. 主体评分数据 open-meteo
     om = open_meteo()
     if om is None:
         msg = "[ERR] open-meteo 数据为空，无法评分。"
@@ -490,7 +554,7 @@ def run_forecast():
     risk_simple = model_lc_risk_simple(vals["low"], vals["t"] - vals["td"], vals["wind"])
     risk_simple_text = f"{RISK_MAP[risk_simple]}（模型12h）"
 
-    risk_model, risk_model_text = fallback_cloudwall_model(sun_hour)
+    risk_model, risk_model_text, samples = fallback_cloudwall_model(sun_hour)
 
     # 5. 文案
     score5 = round(total / (3 * len(det)) * 5, 1)
@@ -509,24 +573,26 @@ def run_forecast():
         "time": now(), "mode": "forecast", "score": total, "score5": score5,
         **{k: v for k, v, _ in det},
         "risk_model_simple": risk_simple,
-        "risk_model_multi": risk_model
+        "risk_model_multi": risk_model,
+        "samples_json": json.dumps(samples, ensure_ascii=False)
     })
 
 
 def run_check(mode: str):
     """
     夜检/凌晨检：
-    - 不抓卫星，直接跑多点模型预警，记录风险值
+    - 不抓卫星，直接跑多点模型预警，记录风险值 + 样本
     """
     _, sun_hour = sunrise_time()
-    risk, txt = fallback_cloudwall_model(sun_hour)
+    risk, txt, samples = fallback_cloudwall_model(sun_hour)
     msg = f"{mode}: risk={risk}, {txt}"
     print(msg)
     save_report(mode, msg)
     log_csv(CONFIG["paths"]["log_cloud"], {
         "time": now(), "mode": mode,
         "cloudwall_score": risk,
-        "text": txt
+        "text": txt,
+        "samples_json": json.dumps(samples, ensure_ascii=False)
     })
 
 
