@@ -107,7 +107,9 @@ def sunrise_time():
     except Exception as e:
         print("[WARN] sunrise-sunset API 失败，使用默认 06:00：", e)
         t = now().replace(hour=6, minute=0, second=0, microsecond=0) + dt.timedelta(days=1)
-    return t.replace(minute=0, second=0, microsecond=0)
+    t_exact = t
+    t_hour  = t_exact.replace(minute=0, second=0, microsecond=0)
+    return t_exact, t_hour
 
 def fetch_himawari_frames(n=6, step=10):
     """抓取最近 n 帧 Himawari Band13 PNG"""
@@ -198,7 +200,7 @@ def calc_score(vals, cloud_base_m, cfg):
 # ----------------- 文案 -----------------
 def build_forecast_text(total, det, sun_t, extra):
     lines = [
-        f"【日出预报 | {now():%m月%d日} → 明早】可拍指数：{total}/18",
+        f"【日出预报 | 明早 {sun_t:%m月%d日}】可拍指数：{total}/18",
         f"地点：{CONFIG['location']['name']}  (lat={LAT}, lon={LON})",
         f"日出：{sun_t:%H:%M}",
         ""
@@ -214,7 +216,7 @@ def build_forecast_text(total, det, sun_t, extra):
 
 # ----------------- 三个模式 -----------------
 def run_forecast():
-    sun_t = sunrise_time()
+    sun_exact, sun_hour = sunrise_time()
     om = open_meteo()
     if om is None:
         msg = "[ERR] open-meteo 数据为空，无法评分。请稍后人工查看。"
@@ -227,7 +229,7 @@ def run_forecast():
 
     hrs = om["hourly"]["time"]
     # 目标小时字符串
-    target = sun_t.strftime("%Y-%m-%dT%H:00")
+    target = sun_hour.strftime("%Y-%m-%dT%H:00")
     if target not in hrs:
         print("[WARN] 未找到日出整点，尝试取最近小时。")
         idx = min(range(len(hrs)),
@@ -249,7 +251,7 @@ def run_forecast():
     cb = parse_cloud_base(mtxt)
 
     total, det = calc_score(vals, cb, CONFIG["scoring"])
-    text = build_forecast_text(total, det, sun_t, extra={})
+    text = build_forecast_text(total, det, sun_exact, extra={})
 
     print(text)
     save_report("forecast", text)
