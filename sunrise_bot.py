@@ -1,24 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-sunrise_bot.py
+sunrise_bot.py （无卫星版）
 模式：
   python sunrise_bot.py forecast    # 下午预测（日出评分+文案）
-  python sunrise_bot.py nightcheck  # 22:00 夜检（记录低云墙指数）
-  python sunrise_bot.py lastcheck   # 03:30 凌晨检（记录低云墙指数）
+  python sunrise_bot.py nightcheck  # 22:00 夜检（记录低云墙指数-模型）
+  python sunrise_bot.py lastcheck   # 03:30 凌晨检（记录低云墙指数-模型）
 
-本版本：
-- 不推送飞书/邮件，只 print，并保存到 out/、logs/ 目录
-- open-meteo 字段名已修正并做健壮性校验
-- 评分含降雨量；总分自动换算成 5 分制
-- 自动生成“普通人可读”的指标描述（含等级+画面感）
-- 加入 12h 模型版低云墙风险
-- ✨ 卫星抓取失败时，使用 meteoblue(若配置) 或 open-meteo 多点采样的“模型替代低云墙预警”
+改动要点：
+- 完全移除 Himawari/卫星帧/OpenCV/cloudwall 依赖
+- “低云墙预警”用 meteoblue（有 key）或 open-meteo 的多点采样模型替代
+- 其他评分逻辑保持不变
 """
 
-import os, sys, json, yaml, datetime as dt
-import requests, pandas as pd, numpy as np
-import warnings, urllib3, pytz, math
+import os
+import sys
+import json
+import yaml
+import math
+import datetime as dt
+
+import requests
+import pandas as pd
+import numpy as np
+import pytz
+import warnings
+import urllib3
 warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -29,20 +36,11 @@ CONFIG = yaml.safe_load(open("config.yaml", "r", encoding="utf-8"))
 LAT = CONFIG["location"]["lat"]
 LON = CONFIG["location"]["lon"]
 
-# meteoblue API（可选）
-MB_API_KEY = os.getenv("MB_API_KEY", "").strip()   # 在 GitHub Secrets 中设置即可
-
-# 是否启用低云墙检测（需要 opencv）
-USE_CLOUDWALL = True
-try:
-    import cv2
-    from cloudwall import low_cloud_ratio, trend_alert
-except Exception as e:
-    USE_CLOUDWALL = False
-    print("[WARN] OpenCV/cloudwall 加载失败，低云墙检测关闭：", e)
+# 可选：meteoblue API key（放 GitHub Secrets 里）
+MB_API_KEY = os.getenv("MB_API_KEY", "").strip()
 
 
-# ----------------- 工具函数 -----------------
+# ----------------- 基础工具 -----------------
 def now():
     return dt.datetime.now(TZ)
 
@@ -64,21 +62,27 @@ def save_report(name: str, text: str):
     with open(fname, "w", encoding="utf-8") as f:
         f.write(text)
 
-# ----------- 球面计算：根据距离 & 方位角求经纬度 -----------
-def offset_latlon(lat, lon, bearing_deg, dist_km):
-    R = 6371.0
-    brng = math.radians(bearing_deg)
-    lat1 = math.radians(lat)
-    lon1 = math.radians(lon)
-    lat2 = math.asin(math.sin(lat1)*math.cos(dist_km/R) +
-                     math.cos(lat1)*math.sin(dist_km/R)*math.cos(brng))
-    lon2 = lon1 + math.atan2(math.sin(brng)*math.sin(dist_km/R)*math.cos(lat1),
-                             math.cos(dist_km/R)-math.sin(lat1)*math.sin(lat2))
-    return math.degrees(lat2), math.degrees(lon2)
 
-# ----------------- 数据获取 -----------------
-def open_meteo(lat: float = None, lon: float = None):
-    """获取 open-meteo 小时级数据，并做健壮性校验；可传入自定义点"""
+# ----------------- 日出时间 -----------------
+def sunrise_time():
+    """获取明日日出：返回(精确时间, 整点时间)"""
+    try:
+        js = requests.get(
+            f"https://api.sunrise-sunset.org/json?lat={LAT}&lng={LON}&date=tomorrow&formatted=0",
+            timeout=30
+        ).json()
+        t = dt.datetime.fromisoformat(js["results"]["sunrise"]).astimezone(TZ)
+    except Exception as e:
+        print("[WARN] sunrise-sunset API 失败，使用默认 06:00：", e)
+        t = now().replace(hour=6, minute=0, second=0, microsecond=0) + dt.timedelta(days=1)
+    t_exact = t
+    t_hour  = t_exact.replace(minute=0, second=0, microsecond=0)
+    return t_exact, t_hour
+
+
+# ----------------- open-meteo 读取 -----------------
+def open_meteo(lat=None, lon=None):
+    """获取 open-meteo 小时级数据，若失败返回 None"""
     lat = LAT if lat is None else lat
     lon = LON if lon is None else lon
     url = (
@@ -93,13 +97,15 @@ def open_meteo(lat: float = None, lon: float = None):
         r.raise_for_status()
         data = r.json()
         if "hourly" not in data or "time" not in data["hourly"]:
-            print("[ERR] open-meteo 响应缺失 hourly 字段，原始响应：", data)
+            print("[ERR] open-meteo hourly 字段缺失：", data)
             return None
         return data
     except Exception as e:
         print("[ERR] open-meteo 请求失败：", e)
         return None
 
+
+# ----------------- METAR 云底 -----------------
 def metar(code="ZGSZ"):
     """NOAA METAR 文本，没有就返回空字符串"""
     try:
@@ -119,108 +125,68 @@ def parse_cloud_base(metar_txt):
     ft = int(m[0][1]) * 100
     return ft * 0.3048
 
-def sunrise_time():
-    """获取明日日出：返回(精确时间, 整点时间)"""
-    try:
-        js = requests.get(
-            f"https://api.sunrise-sunset.org/json?lat={LAT}&lng={LON}&date=tomorrow&formatted=0",
-            timeout=30
-        ).json()
-        t = dt.datetime.fromisoformat(js["results"]["sunrise"]).astimezone(TZ)
-    except Exception as e:
-        print("[WARN] sunrise-sunset API 失败，使用默认 06:00：", e)
-        t = now().replace(hour=6, minute=0, second=0, microsecond=0) + dt.timedelta(days=1)
-    t_exact = t
-    t_hour  = t_exact.replace(minute=0, second=0, microsecond=0)
-    return t_exact, t_hour
 
-def fetch_himawari_frames(n=6, step=10):
-    """
-    抓取最近 n 帧 Himawari PNG。
-    - 时间向下取整到 step 分钟
-    - 依次尝试多个镜像（Himawari-9/8、第三方缓存）
-    - 关闭证书校验，尽量不报 SSL 错
-    """
-    if not USE_CLOUDWALL:
-        return []
-
-    def floor_minutes(t: dt.datetime, base: int) -> dt.datetime:
-        return t.replace(minute=(t.minute // base) * base, second=0, microsecond=0)
-
-    frames = []
-    base_utc = now().astimezone(pytz.UTC)
-    for i in range(n):
-        t_utc = floor_minutes(base_utc - dt.timedelta(minutes=step * i), step)
-        d = t_utc.strftime("%Y%m%d")
-        hm = t_utc.strftime("%H%M")
-        H  = t_utc.strftime("%H")
-        M  = t_utc.strftime("%M")
-
-        urls = [
-            f"https://himawari9.nict.go.jp/img/D531106/2d/550/{d}/{hm}00_0_0.png",
-            f"https://himawari8.nict.go.jp/img/D531106/2d/550/{d}/{hm}00_0_0.png",
-            f"https://www.himawari-8.com/data/23/WL/550/{d}/{hm}00_0_0.png",
-            f"https://rammb-slider.cira.colostate.edu/data/imagery/Himawari-9/Full_Disk/GeoColor/{d}/{H}/{M}/000_000.png",
-        ]
-
-        success = False
-        for url in urls:
-            try:
-                r = requests.get(url, timeout=25, verify=False)
-                if r.status_code == 200:
-                    arr = np.frombuffer(r.content, np.uint8)
-                    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                    if img is not None:
-                        frames.append((t_utc, img))
-                        success = True
-                        break
-            except Exception:
-                pass
-
-        if not success:
-            print(f"[WARN] 卫星帧获取失败: {t_utc.isoformat()}  (尝试 {len(urls)} 个源)")
-
-    frames.sort(key=lambda x: x[0])
-    return frames
-
-# --------------- meteoblue point API（可选）----------------
+# ----------------- meteoblue point API（可选） -----------------
 def mb_point_lowcloud(lat, lon, when_hour):
     """
-    用 meteoblue point API 获取 指定经纬度&时刻 的低云覆盖率/云底高度。
-    需要 MB_API_KEY；无则返回 None。
-    这里用 basic-1h 包为例，具体字段请按你的套餐调整。
+    读取 meteoblue Point API 的低云覆盖率 & 云底高度
+    返回 dict: {"low_cloud": %, "cloud_base": m} 或 None
     """
     if not MB_API_KEY:
         return None
     try:
-        # 你实际购买的 package 可能不是 basic-1h_basic-day，请根据账户页面替换
+        # 这里以 basic-1h_basic-day 为例；请根据你的套餐调整 package 名称
         url = ("https://my.meteoblue.com/packages/basic-1h_basic-day"
                f"?apikey={MB_API_KEY}&lat={lat:.4f}&lon={lon:.4f}"
                "&format=json&tz=Asia/Shanghai")
         js = requests.get(url, timeout=30).json()
-        # 下面解析需根据实际返回结构修改，这里给出一个典型结构示意：
-        # 假设 data_1h 部分包含 time, low_clouds, cloud_base
+
+        # 找小时数据块
         data = js.get("data_1h") or js.get("data_hourly") or {}
-        times = data.get("time") or []
-        target = when_hour.strftime("%Y-%m-%d %H:00")
-        if target not in times:
+        times = data.get("time") or data.get("time_local") or data.get("time_iso8601") or []
+        # 格式兼容：YYYY-MM-DD HH:00
+        tgt = when_hour.strftime("%Y-%m-%d %H:00")
+        if tgt not in times:
             return None
-        idx = times.index(target)
-        low  = (data.get("low_clouds") or [None])[idx]
-        base = (data.get("cloud_base") or [None])[idx]
+        idx = times.index(tgt)
+
+        def pick(keys, default=None):
+            for k in keys:
+                if k in data:
+                    return data[k][idx]
+            return default
+
+        low  = pick(["low_clouds", "low_cloud_cover", "cloudcover_low"])
+        base = pick(["cloud_base", "cloudbase", "cloud_base_height"])
+
         return {"low_cloud": low, "cloud_base": base}
     except Exception as e:
-        print("[WARN] meteoblue point API failed:", e)
+        print("[WARN] meteoblue point API 失败：", e)
         return None
 
-# --------------- 卫星失败时的“模型替代低云墙预警” ---------------
+
+# ----------------- 距离/方位角 -> 经纬度 -----------------
+def offset_latlon(lat, lon, bearing_deg, dist_km):
+    R = 6371.0
+    brng = math.radians(bearing_deg)
+    lat1 = math.radians(lat)
+    lon1 = math.radians(lon)
+    lat2 = math.asin(math.sin(lat1)*math.cos(dist_km/R) +
+                     math.cos(lat1)*math.sin(dist_km/R)*math.cos(brng))
+    lon2 = lon1 + math.atan2(math.sin(brng)*math.sin(dist_km/R)*math.cos(lat1),
+                             math.cos(lat1)*math.cos(dist_km/R)-math.sin(lat1)*math.sin(lat2))
+    return math.degrees(lat2), math.degrees(lon2)
+
+
+# ----------------- “低云墙预警”模型 -----------------
 def fallback_cloudwall_model(sun_hour):
     """
-    沿日出方向扫线采样多个点，利用 meteoblue/open-meteo 的低云覆盖率(+云底高度)判断风险。
-    返回 (risk_score, text)
+    沿日出方向取多个距离点，读取低云覆盖率(必) + 云底高度(尽量)。
+    用规则模型给出风险等级：
+      2 = 预警；1 = 关注；0 = 正常
+    返回 (score, text)
     """
     cfg = CONFIG.get("cloudwall", {})
-    # 方位角：没有就简单用 90 度（正东），也可以放 config
     bearing = cfg.get("sunrise_azimuth", 90)
     dists   = cfg.get("sample_km", [20, 50, 80, 120])
 
@@ -229,14 +195,14 @@ def fallback_cloudwall_model(sun_hour):
         plat, plon = offset_latlon(LAT, LON, bearing, d)
         rec = mb_point_lowcloud(plat, plon, sun_hour)
         if rec is None:
-            # 用 open-meteo 兜底（只有低云，没有云底）
+            # 用 open-meteo 兜底
             om = open_meteo(plat, plon)
             if om is None:
+                samples.append((d, None, None))
                 continue
             times = om["hourly"]["time"]
             tgt = sun_hour.strftime("%Y-%m-%dT%H:00")
             if tgt not in times:
-                # 找最近小时
                 idx = min(range(len(times)),
                           key=lambda i: abs(dt.datetime.fromisoformat(times[i]) - sun_hour))
             else:
@@ -253,12 +219,13 @@ def fallback_cloudwall_model(sun_hour):
     txt  = risk_text_from_samples(risk, samples)
     return risk, txt
 
+
 def model_lc_risk_v2(samples):
     """
-    更细的低云墙风险模型：
-      - 任意样本 low>=50 且 (base is None or base<600) => 2(预警)
-      - 或者 >=50% 的样本 low>=30 => 2
-      - 若有样本 low>=30 或 base<800 => 1(关注)
+    规则：
+      - 任意样本 low>=50% 且 (cloud_base<600m 或 cloud_base 缺失) => 2(预警)
+      - 或 >=50% 的样本 low>=30% => 2
+      - 若存在样本 low>=30% 或 cloud_base<800m => 1(关注)
       - 否则 0(正常)
     """
     if not samples:
@@ -272,10 +239,11 @@ def model_lc_risk_v2(samples):
     return 0
 
 def risk_text_from_samples(risk, samples):
-    stat = {0:"正常(模型替代)",1:"关注(模型替代)",2:"预警(模型替代)"}.get(risk,"?")
-    detail = " | ".join([f"{d}km:{l if l is not None else '?'}%/{int(b) if b else 'NA'}m"
+    stat = {0:"正常(模型)",1:"关注(模型)",2:"预警(模型)"}.get(risk,"?")
+    detail = " | ".join([f"{d}km:{(str(l)+'%') if l is not None else '?'} / {int(b) if b else 'NA'}m"
                          for d,l,b in samples])
     return f"{stat}（samples: {detail}）"
+
 
 # ----------------- 评分逻辑 -----------------
 def score_value(v, bounds):
@@ -352,6 +320,7 @@ def calc_score(vals, cloud_base_m, cfg):
 
     return total, detail
 
+
 # ----------------- 文案 -----------------
 def build_forecast_text(total, det, sun_t, extra):
     lines = [
@@ -370,7 +339,7 @@ def build_forecast_text(total, det, sun_t, extra):
     return "\n".join(lines)
 
 def gen_scene_desc(score5, kv, sun_t):
-    """根据主要指标生成普通人可读描述（5分制，保留1位小数）"""
+    """根据主要指标生成普通人可读描述（5分制）"""
     lc   = kv.get("低云%",      0) or 0
     mh   = kv.get("中/高云%",    0) or 0
     cb   = kv.get("云底高度m",   -1)
@@ -401,7 +370,7 @@ def gen_scene_desc(score5, kv, sun_t):
 
     # 云底高度
     if cb is None or cb < 0:
-        cb_level, cb_text, cb_show = "未知", "云底数据缺失，凌晨再看卫星确认低云墙", "未知"
+        cb_level, cb_text, cb_show = "未知", "云底数据缺失，可参考凌晨“低云墙预警”", "未知"
     elif cb > 1000:
         cb_level, cb_text, cb_show = ">1000m", "云底较高，多当“天花板”，不挡海平线", f"{cb:.0f}m"
     elif cb > 500:
@@ -421,7 +390,7 @@ def gen_scene_desc(score5, kv, sun_t):
     if 2 <= wind <= 5:
         wind_level, wind_text = "2~5m/s", "海面有微波纹，反光好，三脚架稳"
     elif wind < 2:
-        wind_level, wind_text = "<2m/s", "几乎无风，注意镜头容易结露"
+        wind_level, wind_text = "<2m/s", "几乎无风，注意镜头易结露"
     elif wind <= 8:
         wind_level, wind_text = "5~8m/s", "风稍大，留意三脚架稳定性"
     else:
@@ -462,8 +431,9 @@ def gen_scene_desc(score5, kv, sun_t):
         f"- 露点差：{dp:.1f} ℃（{dp_level}）— {dp_text}"
     )
 
-# --------- 简单版模型风险(保留以兼容旧字段) ---------
-def model_lc_risk(lc, dp, wind):
+
+# --------- 简单旧版风险（保留兼容） ---------
+def model_lc_risk_simple(lc, dp, wind):
     if lc is None:
         return 1
     if lc >= 50 and dp < 2:
@@ -474,12 +444,15 @@ def model_lc_risk(lc, dp, wind):
 
 RISK_MAP = {0: "正常", 1: "关注", 2: "高风险"}
 
-# ----------------- 三个模式 -----------------
+
+# ----------------- 各模式 -----------------
 def run_forecast():
     sun_exact, sun_hour = sunrise_time()
+
+    # 1. 拿 open-meteo 主体数据（评分）
     om = open_meteo()
     if om is None:
-        msg = "[ERR] open-meteo 数据为空，无法评分。请稍后人工查看。"
+        msg = "[ERR] open-meteo 数据为空，无法评分。"
         print(msg)
         save_report("forecast_error", msg)
         log_csv(CONFIG["paths"]["log_scores"], {
@@ -490,7 +463,7 @@ def run_forecast():
     hrs = om["hourly"]["time"]
     target = sun_hour.strftime("%Y-%m-%dT%H:00")
     if target not in hrs:
-        print("[WARN] 未找到日出整点，尝试取最近小时。")
+        print("[WARN] 未找到日出整点，取最近小时。")
         idx = min(range(len(hrs)),
                   key=lambda i: abs(dt.datetime.fromisoformat(hrs[i]) - sun_hour))
     else:
@@ -507,37 +480,25 @@ def run_forecast():
         precip = om["hourly"]["precipitation"][idx]
     )
 
-    mtxt = metar("ZGSZ")
-    cb = parse_cloud_base(mtxt)
+    # 2. 云底高度：METAR
+    cb = parse_cloud_base(metar("ZGSZ"))
 
+    # 3. 总分
     total, det = calc_score(vals, cb, CONFIG["scoring"])
 
-    # 12小时模型版低云墙风险（简单点）
-    risk_model = model_lc_risk(vals["low"], vals["t"] - vals["td"], vals["wind"])
-    risk_text  = f"{RISK_MAP[risk_model]}（模型12h）"
+    # 4. 模型低云墙风险（简单 + 多点模型）
+    risk_simple = model_lc_risk_simple(vals["low"], vals["t"] - vals["td"], vals["wind"])
+    risk_simple_text = f"{RISK_MAP[risk_simple]}（模型12h）"
 
-    # 卫星实况预警 + 模型兜底
-    cw_score, cw_text = -1, "待22:00更新"
-    if USE_CLOUDWALL:
-        cfg = CONFIG["cloudwall"]
-        frames = fetch_himawari_frames(cfg["frames"], cfg["step_min"])
-        if frames:
-            ratios = [low_cloud_ratio(img, cfg["roi"], cfg["gray_threshold"]) for _, img in frames]
-            cw_score = trend_alert(ratios, cfg["ratio_warn"])
-            cw_text = {0: "正常", 1: "关注", 2: "预警"}.get(cw_score, "?") + f"（最新占比 {ratios[-1]:.2f}）"
-        else:
-            # 卫星失败 -> 调用模型替代
-            cw_score, cw_text = fallback_cloudwall_model(sun_hour)
-    else:
-        cw_text = "卫星未启用"
+    risk_model, risk_model_text = fallback_cloudwall_model(sun_hour)
 
-    # 5分制评分 & 场景描述
+    # 5. 文案
     score5 = round(total / (3 * len(det)) * 5, 1)
     kv = {k: v for k, v, _ in det}
     scene_txt = (
         gen_scene_desc(score5, kv, sun_exact)
-        + f"\n- 低云墙风险（模型12h）：{risk_text}"
-        + f"\n- 低云墙预警（卫星/模型）：{cw_text}"
+        + f"\n- 低云墙风险（模型12h）：{risk_simple_text}"
+        + f"\n- 低云墙预警（模型多点）：{risk_model_text}"
     )
 
     text = scene_txt + "\n\n" + build_forecast_text(total, det, sun_exact, extra={})
@@ -547,49 +508,27 @@ def run_forecast():
     log_csv(CONFIG["paths"]["log_scores"], {
         "time": now(), "mode": "forecast", "score": total, "score5": score5,
         **{k: v for k, v, _ in det},
-        "risk_model": risk_model,
-        "cw_score_forecast": cw_score
+        "risk_model_simple": risk_simple,
+        "risk_model_multi": risk_model
     })
 
+
 def run_check(mode: str):
-    """夜检/凌晨检：记录低云墙指数，可选预警；卫星失败时同样用模型兜底"""
-    if not USE_CLOUDWALL:
-        msg = f"{mode}: 未启用低云墙检测，跳过。"
-        print(msg)
-        save_report(mode, msg)
-        log_csv(CONFIG["paths"]["log_cloud"], {
-            "time": now(), "mode": mode, "cloudwall_score": -1, "ratios": "[]"
-        })
-        return
-
-    cfg = CONFIG["cloudwall"]
-    frames = fetch_himawari_frames(cfg["frames"], cfg["step_min"])
-    if not frames:
-        # 卫星失败 -> 走模型兜底
-        _, sun_hour = sunrise_time()
-        risk, txt = fallback_cloudwall_model(sun_hour)
-        msg = f"{mode}: 无卫星帧，使用模型替代 -> risk={risk}, {txt}"
-        print(msg)
-        save_report(mode, msg)
-        log_csv(CONFIG["paths"]["log_cloud"], {
-            "time": now(), "mode": mode,
-            "cloudwall_score": risk,
-            "ratios": "[]",
-            "fallback": True,
-            "fallback_text": txt
-        })
-        return
-
-    ratios = [low_cloud_ratio(img, cfg["roi"], cfg["gray_threshold"]) for _, img in frames]
-    cw_score = trend_alert(ratios, cfg["ratio_warn"])
-    msg = f"{mode}: cloudwall_score={cw_score}, ratios={ratios}"
+    """
+    夜检/凌晨检：
+    - 不抓卫星，直接跑多点模型预警，记录风险值
+    """
+    _, sun_hour = sunrise_time()
+    risk, txt = fallback_cloudwall_model(sun_hour)
+    msg = f"{mode}: risk={risk}, {txt}"
     print(msg)
     save_report(mode, msg)
     log_csv(CONFIG["paths"]["log_cloud"], {
         "time": now(), "mode": mode,
-        "cloudwall_score": cw_score,
-        "ratios": json.dumps(ratios, ensure_ascii=False)
+        "cloudwall_score": risk,
+        "text": txt
     })
+
 
 # ----------------- 主入口 -----------------
 if __name__ == "__main__":
@@ -611,4 +550,3 @@ if __name__ == "__main__":
         log_csv(CONFIG["paths"]["log_scores"], {
             "time": now(), "mode": mode, "score": -1, "error": repr(e)
         })
-        # 不 raise，保证 exit code 0
