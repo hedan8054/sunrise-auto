@@ -118,25 +118,53 @@ def sunrise_time():
     return t_exact, t_hour
 
 def fetch_himawari_frames(n=6, step=10):
-    """抓取最近 n 帧 Himawari Band13 PNG"""
+    """抓取最近 n 帧 Himawari PNG
+    - 向下取整到 step 分钟（默认 10 分钟）
+    - 先尝试 NICT 官方源，失败再试 RAMMB 缓存
+    """
     if not USE_CLOUDWALL:
         return []
+
+    def floor_minutes(t: dt.datetime, base: int) -> dt.datetime:
+        return t.replace(minute=(t.minute // base) * base, second=0, microsecond=0)
+
     frames = []
-    base = now()
+    base = now().astimezone(pytz.UTC)   # Himawari 时间用 UTC 更稳
     for i in range(n):
-        t = base - dt.timedelta(minutes=step * i)
-        url = (
-            "https://himawari8.nict.go.jp/img/D531106/2d/550/"
-            f"{t.strftime('%Y%m%d')}/{t.strftime('%H%M')}00_0_0.png"
-        )
-        try:
-            r = requests.get(url, timeout=30, verify=False)
-            if r.status_code == 200:
-                arr = np.frombuffer(r.content, np.uint8)
-                img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                frames.append((t, img))
-        except Exception as e:
-            print("[WARN] 下载卫星帧失败：", e)
+        t_utc = floor_minutes(base - dt.timedelta(minutes=step * i), step)
+
+        # URL 列表（依次尝试）
+        candidates = [
+            # NICT 官方(2km/px, 550px tile)
+            "https://himawari8.nict.go.jp/img/D531106/2d/550/{date}/{time}00_0_0.png",
+            # RAMMB Slider（全盘 GeoColor 真实彩图）
+            "https://rammb-slider.cira.colostate.edu/data/imagery/Himawari-9/Full_Disk/GeoColor/{date}/{hour}/{minute}/000_000.png"
+        ]
+
+        ok = False
+        for u in candidates:
+            url = u.format(
+                date=t_utc.strftime("%Y%m%d"),
+                time=t_utc.strftime("%H%M"),
+                hour=t_utc.strftime("%H"),
+                minute=t_utc.strftime("%M")
+            )
+            try:
+                r = requests.get(url, timeout=30, verify=False)
+                if r.status_code == 200:
+                    arr = np.frombuffer(r.content, np.uint8)
+                    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                    if img is not None:
+                        frames.append((t_utc, img))
+                        ok = True
+                        break
+            except Exception as e:
+                # 继续试下一个源
+                pass
+
+        if not ok:
+            print(f"[WARN] 卫星帧获取失败: {t_utc.isoformat()} (尝试了{len(candidates)}个源)")
+
     frames.sort(key=lambda x: x[0])
     return frames
 
