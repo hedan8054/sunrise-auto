@@ -12,6 +12,7 @@ sunrise_bot.py
 - open-meteo 字段名已修正并做健壮性校验
 - 评分含降雨量；总分自动换算成 5 分制
 - 自动生成“普通人可读”的指标描述（含等级+画面感）
+- 加入 12h 模型版低云墙风险 + （可选）卫星实况预警
 """
 
 import os, sys, json, yaml, datetime as dt
@@ -229,7 +230,7 @@ def build_forecast_text(total, det, sun_t, extra):
     return "\n".join(lines)
 
 def gen_scene_desc(score5, kv, sun_t):
-    """根据主要指标生成普通人可读描述（5分制，保留1位小数），并给出每个指标的“级别+画面感”"""
+    """根据主要指标生成普通人可读描述（5分制，保留1位小数）"""
     lc   = kv.get("低云%",      0) or 0
     mh   = kv.get("中/高云%",    0) or 0
     cb   = kv.get("云底高度m",   -1)
@@ -238,110 +239,76 @@ def gen_scene_desc(score5, kv, sun_t):
     dp   = kv.get("露点差°C",    0) or 0
     rp   = kv.get("降雨量mm",    0) or 0
 
-    # ===== 低云 =====
+    # 低云
     if lc < 20:
-        lc_level = "低"
-        low_text = "地平线基本通透，太阳能“蹦”出来"
+        lc_level = "低";      low_text = "地平线基本通透，太阳能“蹦”出来"
     elif lc < 40:
-        lc_level = "中"
-        low_text = "地平线可能有一条灰带，太阳或从缝隙钻出"
+        lc_level = "中";      low_text = "地平线可能有一条灰带，太阳或从缝隙钻出"
     elif lc < 60:
-        lc_level = "偏高"
-        low_text = "低云偏多，首轮日光可能被挡一部分"
+        lc_level = "偏高";    low_text = "低云偏多，首轮日光可能被挡一部分"
     else:
-        lc_level = "高"
-        low_text = "一堵低云墙，首轮日光大概率看不到"
+        lc_level = "高";      low_text = "一堵低云墙，首轮日光大概率看不到"
 
-    # ===== 中/高云 =====
+    # 中/高云
     if 20 <= mh <= 60:
-        mh_level = "适中"
-        fire_text = "有“云接光”舞台，可能染上粉橙色（小概率火烧云）"
+        mh_level = "适中";    fire_text = "有“云接光”舞台，可能染上粉橙色（小概率火烧云）"
     elif mh < 20:
-        mh_level = "太少"
-        fire_text = "天空太干净，只有简单渐变色"
+        mh_level = "太少";    fire_text = "天空太干净，只有简单渐变色"
     elif mh <= 80:
-        mh_level = "偏多"
-        fire_text = "云多且厚，色彩可能偏闷"
+        mh_level = "偏多";    fire_text = "云多且厚，色彩可能偏闷"
     else:
-        mh_level = "很多"
-        fire_text = "厚云盖顶，大概率阴沉"
+        mh_level = "很多";    fire_text = "厚云盖顶，大概率阴沉"
 
-    # ===== 云底高度 =====
+    # 云底高度
     if cb is None or cb < 0:
-        cb_level = "未知"
-        cb_text  = "云底数据缺失，凌晨再看卫星确认低云墙"
-        cb_show  = "未知"
+        cb_level, cb_text, cb_show = "未知", "云底数据缺失，凌晨再看卫星确认低云墙", "未知"
     elif cb > 1000:
-        cb_level = ">1000m"
-        cb_text  = "云底较高，多当“天花板”，不挡海平线"
-        cb_show  = f"{cb:.0f}m"
+        cb_level, cb_text, cb_show = ">1000m", "云底较高，多当“天花板”，不挡海平线", f"{cb:.0f}m"
     elif cb > 500:
-        cb_level = "500~1000m"
-        cb_text  = "可能在海面上方形成一道云棚，注意日出角度"
-        cb_show  = f"{cb:.0f}m"
+        cb_level, cb_text, cb_show = "500~1000m", "可能在海面上方形成一道云棚，注意日出角度", f"{cb:.0f}m"
     else:
-        cb_level = "<500m"
-        cb_text  = "贴海低云/雾，像拉了窗帘"
-        cb_show  = f"{cb:.0f}m"
+        cb_level, cb_text, cb_show = "<500m", "贴海低云/雾，像拉了窗帘", f"{cb:.0f}m"
 
-    # ===== 能见度 =====
+    # 能见度
     if vis >= 15:
-        vis_level = ">15km"
-        vis_text  = "空气透明度好，远景清晰，金光反射漂亮"
+        vis_level, vis_text = ">15km", "空气透明度好，远景清晰，金光反射漂亮"
     elif vis >= 8:
-        vis_level = "8~15km"
-        vis_text  = "中等透明度，远景略灰"
+        vis_level, vis_text = "8~15km", "中等透明度，远景略灰"
     else:
-        vis_level = "<8km"
-        vis_text  = "背景灰蒙蒙，层次差"
+        vis_level, vis_text = "<8km", "背景灰蒙蒙，层次差"
 
-    # ===== 风速 =====
+    # 风速
     if 2 <= wind <= 5:
-        wind_level = "2~5m/s"
-        wind_text  = "海面有微波纹，反光好，三脚架稳"
+        wind_level, wind_text = "2~5m/s", "海面有微波纹，反光好，三脚架稳"
     elif wind < 2:
-        wind_level = "<2m/s"
-        wind_text  = "几乎无风，注意镜头容易结露"
+        wind_level, wind_text = "<2m/s", "几乎无风，注意镜头容易结露"
     elif wind <= 8:
-        wind_level = "5~8m/s"
-        wind_text  = "风稍大，留意三脚架稳定性"
+        wind_level, wind_text = "5~8m/s", "风稍大，留意三脚架稳定性"
     else:
-        wind_level = ">8m/s"
-        wind_text  = "大风天，拍摄体验差，器材要护好"
+        wind_level, wind_text = ">8m/s", "大风天，拍摄体验差，器材要护好"
 
-    # ===== 露点差 =====
+    # 露点差
     if dp >= 3:
-        dp_level = "≥3℃"
-        dp_text  = "不易起雾"
+        dp_level, dp_text = "≥3℃", "不易起雾"
     elif dp >= 1:
-        dp_level = "1~3℃"
-        dp_text  = "稍潮，镜头可能结露"
+        dp_level, dp_text = "1~3℃", "稍潮，镜头可能结露"
     else:
-        dp_level = "<1℃"
-        dp_text  = "极易起雾，注意海雾/镜头起雾风险"
+        dp_level, dp_text = "<1℃", "极易起雾，注意海雾/镜头起雾风险"
 
-    # ===== 降雨 =====
+    # 降雨
     if rp < 0.1:
-        rp_level = "<0.1mm"
-        rain_text = "几乎不会下雨"
+        rp_level, rain_text = "<0.1mm", "几乎不会下雨"
     elif rp < 1:
-        rp_level = "0.1~1mm"
-        rain_text = "可能有零星小雨/毛毛雨"
+        rp_level, rain_text = "0.1~1mm", "可能有零星小雨/毛毛雨"
     else:
-        rp_level = "≥1mm"
-        rain_text = "有下雨可能，注意防水和收纳镜头"
+        rp_level, rain_text = "≥1mm", "有下雨可能，注意防水和收纳镜头"
 
-    # ===== 评分等级文字 =====
-    if score5 >= 4.0:
-        grade = "建议出发（把握较大）"
-    elif score5 >= 3.0:
-        grade = "可去一搏（不稳）"
-    elif score5 >= 2.0:
-        grade = "机会一般（看心情或距离）"
-    elif score5 >= 1.0:
-        grade = "概率很小（除非就在附近）"
-    else:
-        grade = "建议休息（基本无戏）"
+    # 评分等级
+    if score5 >= 4.0:   grade = "建议出发（把握较大）"
+    elif score5 >= 3.0: grade = "可去一搏（不稳）"
+    elif score5 >= 2.0: grade = "机会一般（看心情或距离）"
+    elif score5 >= 1.0: grade = "概率很小（除非就在附近）"
+    else:               grade = "建议休息（基本无戏）"
 
     return (
         f"【直观判断】评分：{score5:.1f}/5 —— {grade}\n"
@@ -354,22 +321,25 @@ def gen_scene_desc(score5, kv, sun_t):
         f"- 降雨：{rp:.1f} mm（{rp_level}）— {rain_text}\n"
         f"- 露点差：{dp:.1f} ℃（{dp_level}）— {dp_text}"
     )
-    def model_lc_risk(lc, dp, wind):
-        """
-        简易规则：
-        - lc≥50 且 dp<2 → 高风险(2)
-        - lc≥30 → 关注(1)
-        - 其它 → 正常(0)
-        """
-        if lc is None:
-            return 1  # 数据缺失给“关注”
-        if lc >= 50 and dp < 2:
-            return 2
-        if lc >= 30:
-            return 1
-        return 0
-    
-    RISK_MAP = {0: "正常", 1: "关注", 2: "高风险"}
+
+# --------- 模型版低云墙风险函数（放在 gen_scene_desc 之后，顶格定义）---------
+def model_lc_risk(lc, dp, wind):
+    """
+    12h 模型风险简单规则：
+    - lc≥50 且 dp<2 → 高风险(2)
+    - lc≥30 → 关注(1)
+    - 其它 → 正常(0)
+    """
+    if lc is None:
+        return 1  # 数据缺失 → 关注
+    if lc >= 50 and dp < 2:
+        return 2
+    if lc >= 30:
+        return 1
+    return 0
+
+RISK_MAP = {0: "正常", 1: "关注", 2: "高风险"}
+
 # ----------------- 三个模式 -----------------
 def run_forecast():
     sun_exact, sun_hour = sunrise_time()
@@ -407,11 +377,12 @@ def run_forecast():
     cb = parse_cloud_base(mtxt)
 
     total, det = calc_score(vals, cb, CONFIG["scoring"])
+
     # 12小时模型版低云墙风险
     risk_model = model_lc_risk(vals["low"], vals["t"] - vals["td"], vals["wind"])
     risk_text  = f"{RISK_MAP[risk_model]}（模型12h）"
 
-    # （可选）卫星实况预警，想要就保留，不要就删掉这一段
+    # （可选）卫星实况预警
     cw_score, cw_text = -1, "待22:00更新"
     if USE_CLOUDWALL:
         cfg = CONFIG["cloudwall"]
@@ -422,6 +393,7 @@ def run_forecast():
             cw_text = {0: "正常", 1: "关注", 2: "预警"}.get(cw_score, "?") + f"（最新占比 {ratios[-1]:.2f}）"
         else:
             cw_text = "卫星未取到，风险未知"
+
     # 5分制评分 & 场景描述
     score5 = round(total / (3 * len(det)) * 5, 1)
     kv = {k: v for k, v, _ in det}
@@ -455,6 +427,15 @@ def run_check(mode: str):
 
     cfg = CONFIG["cloudwall"]
     frames = fetch_himawari_frames(cfg["frames"], cfg["step_min"])
+    if not frames:
+        msg = f"{mode}: 未获取到任何卫星帧（可能是网络/SSL问题），跳过评分。"
+        print(msg)
+        save_report(mode, msg)
+        log_csv(CONFIG["paths"]["log_cloud"], {
+            "time": now(), "mode": mode, "cloudwall_score": -1, "ratios": "[]", "error": "no_frames"
+        })
+        return
+
     ratios = []
     for _, img in frames:
         r = low_cloud_ratio(img, cfg["roi"], cfg["gray_threshold"])
