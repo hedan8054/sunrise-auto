@@ -9,7 +9,9 @@ sunrise_bot.py
 
 本版本：
 - 不推送飞书/邮件，只 print，并保存到 out/、logs/ 目录
-- 对 open-meteo 接口做了健壮性判断，避免 KeyError: 'hourly'
+- open-meteo 字段名已修正并做健壮性校验
+- 评分含降雨量；总分自动换算成 5 分制
+- 自动生成“普通人可读”的指标描述（含等级+画面感）
 """
 
 import os, sys, json, yaml, datetime as dt
@@ -97,7 +99,7 @@ def parse_cloud_base(metar_txt):
     return ft * 0.3048
 
 def sunrise_time():
-    """获取明日日出时间（整点小时）"""
+    """获取明日日出：返回(精确时间, 整点时间)"""
     try:
         js = requests.get(
             f"https://api.sunrise-sunset.org/json?lat={LAT}&lng={LON}&date=tomorrow&formatted=0",
@@ -137,8 +139,8 @@ def fetch_himawari_frames(n=6, step=10):
 # ----------------- 评分逻辑 -----------------
 def score_value(v, bounds):
     """
-    bounds 长度：
-      3个数 [lo, mid, hi] : lo~mid=2分；其余靠近区间=1分，否则0
+    bounds：
+      3个数 [lo, mid, hi] : lo~mid=2分；其它近段=1分；否则0
       2个数 [lo, hi]      : >=hi=2分；>=lo=1分；否则0
     """
     if v is None:
@@ -161,12 +163,15 @@ def score_value(v, bounds):
 def calc_score(vals, cloud_base_m, cfg):
     detail, total = [], 0
 
+    # 低云
     lc = vals["low"]
     pt = score_value(lc, cfg["low_cloud"]); detail.append(("低云%", lc, pt)); total += pt
 
+    # 中/高云
     mh = max(vals["mid"], vals["high"])
     pt = score_value(mh, cfg["mid_high_cloud"]); detail.append(("中/高云%", mh, pt)); total += pt
 
+    # 云底
     if cloud_base_m is None:
         pt, val = 1, -1
     else:
@@ -175,11 +180,13 @@ def calc_score(vals, cloud_base_m, cfg):
         val = cloud_base_m
     detail.append(("云底高度m", val, pt)); total += pt
 
+    # 能见度
     vis_km = (vals["vis"] or 0) / 1000.0
     lo, hi = cfg["visibility_km"]
     pt = 2 if vis_km >= hi else 1 if vis_km >= lo else 0
     detail.append(("能见度km", vis_km, pt)); total += pt
 
+    # 风速
     w = vals["wind"]
     lo1, lo2, hi2, hi3 = cfg["wind_ms"]
     if lo2 <= w <= hi2:
@@ -190,11 +197,13 @@ def calc_score(vals, cloud_base_m, cfg):
         pt = 0
     detail.append(("风速m/s", w, pt)); total += pt
 
+    # 露点差
     dp = vals["t"] - vals["td"]
     lo, hi = cfg["dewpoint_diff"]
     pt = 2 if dp >= hi else 1 if dp >= lo else 0
     detail.append(("露点差°C", dp, pt)); total += pt
-    # 降雨量 mm/h
+
+    # 降雨量
     p = vals.get("precip", 0)
     lo, hi = cfg["precip_mm"]
     pt = 2 if p < lo else 1 if p < hi else 0
@@ -205,7 +214,7 @@ def calc_score(vals, cloud_base_m, cfg):
 # ----------------- 文案 -----------------
 def build_forecast_text(total, det, sun_t, extra):
     lines = [
-        f"【日出预报 | 明早 {sun_t:%m月%d日}】可拍指数：{total}/18",
+        f"【日出预报 | 明早 {sun_t:%m月%d日}】拍摄指数：{total}/18",
         f"地点：{CONFIG['location']['name']}  (lat={LAT}, lon={LON})",
         f"日出：{sun_t:%H:%M}",
         ""
@@ -218,6 +227,7 @@ def build_forecast_text(total, det, sun_t, extra):
     if extra.get("note"):
         lines.append("\n提示：" + extra["note"])
     return "\n".join(lines)
+
 def gen_scene_desc(score5, kv, sun_t):
     """根据主要指标生成普通人可读描述（5分制，保留1位小数），并给出每个指标的“级别+画面感”"""
     lc   = kv.get("低云%",      0) or 0
@@ -242,7 +252,7 @@ def gen_scene_desc(score5, kv, sun_t):
         lc_level = "高"
         low_text = "一堵低云墙，首轮日光大概率看不到"
 
-    # ===== 中/高云（决定彩云/火烧云）=====
+    # ===== 中/高云 =====
     if 20 <= mh <= 60:
         mh_level = "适中"
         fire_text = "有“云接光”舞台，可能染上粉橙色（小概率火烧云）"
@@ -344,6 +354,7 @@ def gen_scene_desc(score5, kv, sun_t):
         f"- 降雨：{rp:.1f} mm（{rp_level}）— {rain_text}\n"
         f"- 露点差：{dp:.1f} ℃（{dp_level}）— {dp_text}"
     )
+
 # ----------------- 三个模式 -----------------
 def run_forecast():
     sun_exact, sun_hour = sunrise_time()
@@ -358,22 +369,21 @@ def run_forecast():
         return
 
     hrs = om["hourly"]["time"]
-    # 目标小时字符串
     target = sun_hour.strftime("%Y-%m-%dT%H:00")
     if target not in hrs:
         print("[WARN] 未找到日出整点，尝试取最近小时。")
         idx = min(range(len(hrs)),
-                  key=lambda i: abs(dt.datetime.fromisoformat(hrs[i]) - sun_t))
+                  key=lambda i: abs(dt.datetime.fromisoformat(hrs[i]) - sun_hour))
     else:
         idx = hrs.index(target)
 
     vals = dict(
-        low  = om["hourly"]["cloudcover_low"][idx],
-        mid  = om["hourly"]["cloudcover_mid"][idx],
-        high = om["hourly"]["cloudcover_high"][idx],
-        vis  = om["hourly"]["visibility"][idx],
-        t    = om["hourly"]["temperature_2m"][idx],
-        td   = om["hourly"]["dewpoint_2m"][idx],
+        low    = om["hourly"]["cloudcover_low"][idx],
+        mid    = om["hourly"]["cloudcover_mid"][idx],
+        high   = om["hourly"]["cloudcover_high"][idx],
+        vis    = om["hourly"]["visibility"][idx],
+        t      = om["hourly"]["temperature_2m"][idx],
+        td     = om["hourly"]["dewpoint_2m"][idx],
         wind   = om["hourly"]["windspeed_10m"][idx],
         precip = om["hourly"]["precipitation"][idx]
     )
@@ -382,16 +392,18 @@ def run_forecast():
     cb = parse_cloud_base(mtxt)
 
     total, det = calc_score(vals, cb, CONFIG["scoring"])
+
     # 5分制评分 & 场景描述
     score5 = round(total / (3 * len(det)) * 5, 1)
     kv = {k: v for k, v, _ in det}
     scene_txt = gen_scene_desc(score5, kv, sun_exact)
+
     text = scene_txt + "\n\n" + build_forecast_text(total, det, sun_exact, extra={})
 
     print(text)
     save_report("forecast", text)
     log_csv(CONFIG["paths"]["log_scores"], {
-        "time": now(), "mode": "forecast", "score": total,
+        "time": now(), "mode": "forecast", "score": total, "score5": score5,
         **{k: v for k, v, _ in det}
     })
 
