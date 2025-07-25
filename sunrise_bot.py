@@ -354,7 +354,22 @@ def gen_scene_desc(score5, kv, sun_t):
         f"- 降雨：{rp:.1f} mm（{rp_level}）— {rain_text}\n"
         f"- 露点差：{dp:.1f} ℃（{dp_level}）— {dp_text}"
     )
-
+    def model_lc_risk(lc, dp, wind):
+        """
+        简易规则：
+        - lc≥50 且 dp<2 → 高风险(2)
+        - lc≥30 → 关注(1)
+        - 其它 → 正常(0)
+        """
+        if lc is None:
+            return 1  # 数据缺失给“关注”
+        if lc >= 50 and dp < 2:
+            return 2
+        if lc >= 30:
+            return 1
+        return 0
+    
+    RISK_MAP = {0: "正常", 1: "关注", 2: "高风险"}
 # ----------------- 三个模式 -----------------
 def run_forecast():
     sun_exact, sun_hour = sunrise_time()
@@ -392,11 +407,29 @@ def run_forecast():
     cb = parse_cloud_base(mtxt)
 
     total, det = calc_score(vals, cb, CONFIG["scoring"])
+    # 12小时模型版低云墙风险
+    risk_model = model_lc_risk(vals["low"], vals["t"] - vals["td"], vals["wind"])
+    risk_text  = f"{RISK_MAP[risk_model]}（模型12h）"
 
+    # （可选）卫星实况预警，想要就保留，不要就删掉这一段
+    cw_score, cw_text = -1, "待22:00更新"
+    if USE_CLOUDWALL:
+        cfg = CONFIG["cloudwall"]
+        frames = fetch_himawari_frames(cfg["frames"], cfg["step_min"])
+        if frames:
+            ratios = [low_cloud_ratio(img, cfg["roi"], cfg["gray_threshold"]) for _, img in frames]
+            cw_score = trend_alert(ratios, cfg["ratio_warn"])
+            cw_text = {0: "正常", 1: "关注", 2: "预警"}.get(cw_score, "?") + f"（最新占比 {ratios[-1]:.2f}）"
+        else:
+            cw_text = "卫星未取到，风险未知"
     # 5分制评分 & 场景描述
     score5 = round(total / (3 * len(det)) * 5, 1)
     kv = {k: v for k, v, _ in det}
-    scene_txt = gen_scene_desc(score5, kv, sun_exact)
+    scene_txt = (
+        gen_scene_desc(score5, kv, sun_exact)
+        + f"\n- 低云墙风险（模型12h）：{risk_text}"
+        + f"\n- 低云墙预警（卫星实况）：{cw_text}"
+    )
 
     text = scene_txt + "\n\n" + build_forecast_text(total, det, sun_exact, extra={})
 
@@ -404,7 +437,9 @@ def run_forecast():
     save_report("forecast", text)
     log_csv(CONFIG["paths"]["log_scores"], {
         "time": now(), "mode": "forecast", "score": total, "score5": score5,
-        **{k: v for k, v, _ in det}
+        **{k: v for k, v, _ in det},
+        "risk_model": risk_model,
+        "cw_score_forecast": cw_score
     })
 
 def run_check(mode: str):
