@@ -1,0 +1,24 @@
+name: Last Check
+
+on:
+  schedule:
+    - cron: '30 19 * * *'  # UTC 19:30 = 次日 03:30
+  workflow_dispatch:
+
+jobs:
+  run-lastcheck:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python sunrise_bot.py lastcheck
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lastcheck_outputs
+          path: |
+            out/
+            logs/
