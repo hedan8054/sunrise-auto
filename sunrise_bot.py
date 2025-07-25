@@ -61,8 +61,8 @@ def open_meteo():
     url = (
         "https://api.open-meteo.com/v1/forecast"
         f"?latitude={LAT}&longitude={LON}"
-        "&hourly=low_clouds,mid_clouds,high_clouds,visibility,"
-        "temperature_2m,dewpoint_2m,wind_speed_10m,precipitation"
+        "&hourly=cloudcover_low,cloudcover_mid,cloudcover_high,visibility,"
+        "temperature_2m,dewpoint_2m,windspeed_10m,precipitation"
         "&forecast_days=2&timezone=Asia%2FShanghai"
     )
     try:
@@ -236,13 +236,13 @@ def run_forecast():
         idx = hrs.index(target)
 
     vals = dict(
-        low  = om["hourly"]["low_clouds"][idx],
-        mid  = om["hourly"]["mid_clouds"][idx],
-        high = om["hourly"]["high_clouds"][idx],
+        low  = om["hourly"]["cloudcover_low"][idx],
+        mid  = om["hourly"]["cloudcover_mid"][idx],
+        high = om["hourly"]["cloudcover_high"][idx],
         vis  = om["hourly"]["visibility"][idx],
         t    = om["hourly"]["temperature_2m"][idx],
         td   = om["hourly"]["dewpoint_2m"][idx],
-        wind = om["hourly"]["wind_speed_10m"][idx]
+        wind = om["hourly"]["windspeed_10m"][idx]
     )
 
     mtxt = metar("ZGSZ")
