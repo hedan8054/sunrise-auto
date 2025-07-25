@@ -17,6 +17,9 @@ sunrise_bot.py
 
 import os, sys, json, yaml, datetime as dt
 import requests, pandas as pd, numpy as np
+import warnings, urllib3
+warnings.filterwarnings("ignore", message="Unverified HTTPS request")
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 import pytz
 
 # ----------------- 全局配置 -----------------
@@ -127,7 +130,7 @@ def fetch_himawari_frames(n=6, step=10):
             f"{t.strftime('%Y%m%d')}/{t.strftime('%H%M')}00_0_0.png"
         )
         try:
-            r = requests.get(url, timeout=30)
+            r = requests.get(url, timeout=30, verify=False)
             if r.status_code == 200:
                 arr = np.frombuffer(r.content, np.uint8)
                 img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
