@@ -4,31 +4,27 @@ location:
   name: "大鹏半岛·杨梅坑"
 
 scoring:
-  low_cloud:      [0, 30, 50]
+  low_cloud: [0, 30, 50]        # 0~30% =2分；30~50% =1分；其它=0分
   mid_high_cloud: [20, 60, 80]
-  cloud_base_m:   [500, 1000]
-  visibility_km:  [5, 10]
-  wind_ms:        [1, 2, 5, 8]
-  dewpoint_diff:  [1, 3]
-  precip_mm:      [0.1, 1.0]    # <0.1mm=2分；0.1~1mm=1分；>=1mm=0分
+  cloud_base_m: [500, 1000]
+  visibility_km: [5, 10]
+  wind_ms: [1, 2, 5, 8]         # <1 或 >8 =0分；1~2 or 5~8 =1分；2~5 =2分
+  dewpoint_diff: [1, 3]
+  precip_mm: [0.1, 1.0]         # <0.1mm=2分；0.1~1mm=1分；>=1mm=0分
 
+# 低云墙模型参数（多点采样，而非卫星）
 cloudwall:
-  roi: [11800, 6200, 200, 150]   # 先随便用，跑几天再调
-  gray_threshold: 110
-  ratio_warn: 0.12
-  frames: 6
-  step_min: 10
+  sample_km: [20, 50, 80, 120]  # 从站点沿日出/日落方向取的采样距离
+  sunrise_azimuth: 90           # 日出方向（大致东方），可按季节再微调
+  sunset_azimuth: 270           # 日落方向（大致西方）
 
-paths:
-  log_scores: "logs/scores_%Y-%m.csv"
-  log_cloud:  "logs/cloudwall_%Y-%m.csv"
-  
+# 云底估算系数自动校准参数
 cloudbase_estimate:
-  default_coef_m_per_deg: 125        # 默认 125 m/℃（≈400 ft/℃）
-  min_samples: 10                    # 至少多少条样本才触发自动校准
-  max_window_days: 45                # 回溯多少天的数据做校准
-  clip_min: 60                       # 系数下限，避免异常值（单位 m/℃）
-  clip_max: 200                      # 系数上限
+  default_coef_m_per_deg: 125   # 初始：每 1℃ 露点差≈125 m 云底抬升
+  min_samples: 10               # 至少多少条有真实云底的历史样本才启动校准
+  max_window_days: 45           # 回看多少天数据做校准
+  clip_min: 60                  # 系数下限（避免极端值）
+  clip_max: 200                 # 系数上限
 
 paths:
   log_scores: "logs/scores_%Y-%m.csv"
