@@ -1,0 +1,24 @@
+location:
+  lat: 22.54691
+  lon: 114.56853
+  name: "大鹏半岛·杨梅坑"
+
+# 评分阈值（参考你之前的表，可再调）
+scoring:
+  low_cloud:      [0, 30, 50]     # 低云% : <30=2; 30~50=1; >50=0
+  mid_high_cloud: [20, 60, 80]    # 中/高云% : 20~60=2; 60~80=1; 其他0
+  cloud_base_m:   [500, 1000]     # 云底高度m : >1000=2; 500~1000=1; <500=0
+  visibility_km:  [5, 10]         # 能见度 km : ≥10=2; 5~10=1; <5=0
+  wind_ms:        [1, 2, 5, 8]    # 风速 m/s : 2~5=2; 1~2 or 5~8=1; 其他0
+  dewpoint_diff:  [1, 3]          # 露点差 °C : ≥3=2; 1~3=1; <1=0
+
+cloudwall:
+  roi: [11800, 6200, 200, 150]    # 需要你自己慢慢调
+  gray_threshold: 110             # <=110 认为偏暗（低云）
+  ratio_warn: 0.12                # 占比超过 12% 警惕
+  frames: 6                       # 最近6帧
+  step_min: 10                    # 10分钟间隔
+
+paths:
+  log_scores: "logs/scores_%Y-%m.csv"
+  log_cloud:  "logs/cloudwall_%Y-%m.csv"
