@@ -38,7 +38,7 @@ jobs:
           [ -f logs/cloud_${YM}.csv ]  && echo "cloud=logs/cloud_${YM}.csv"  >> $GITHUB_OUTPUT
           [ -f logs/calib_${YM}.csv ]  && echo "calib=logs/calib_${YM}.csv"  >> $GITHUB_OUTPUT
 
-      # 读取报告并转成单行 HTML（换行-><br/>，转义特殊字符）
+      # 读取报告并转成单行 HTML（换行-><br/>，转义 <>&）
       - name: Prepare email body (HTML)
         id: body
         if: ${{ steps.pick.outputs.latest != '' }}
@@ -46,15 +46,10 @@ jobs:
         run: |
           set -e
           FILE="${{ steps.pick.outputs.latest }}"
-          HTML=$(python - <<'PY' "$FILE"
-      import sys, html
-      txt = open(sys.argv[1], 'r', encoding='utf-8').read()
-      # 转义 HTML，再把换行替换为 <br/>
-      print(html.escape(txt).replace('\n','<br/>'))
-      PY
-      )
+          HTML=$(python -c "import html,sys; t=open(r'$FILE','r',encoding='utf-8').read(); print(html.escape(t).replace('\n','<br/>'))")
+          # 单行写入到 GITHUB_OUTPUT
           echo "html=${HTML}" >> "$GITHUB_OUTPUT"
-      
+
       - name: Send email (sunrise)
         if: ${{ steps.pick.outputs.latest != '' }}
         uses: dawidd6/action-send-mail@v3
@@ -77,7 +72,7 @@ jobs:
 
       # 失败兜底：没产生日报或流程失败，发告警
       - name: Send failure email
-        if: failure() || ${{ steps.pick.outputs.latest == '' }}
+        if: ${{ failure() || steps.pick.outputs.latest == '' }}
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.qq.com
