@@ -2,7 +2,7 @@ name: Sunset Forecast
 
 on:
   schedule:
-    # 每天北京时间 05:30 运行（UTC 21:30 前一天）
+    # 每天北京时间 05:30 运行（UTC 前一天 21:30）
     - cron: '30 21 * * *'
   workflow_dispatch:
 
@@ -22,6 +22,7 @@ jobs:
       - name: Run sunset forecast
         run: python sunset_bot.py
 
+      # 选出最新日落报告和当月日志，供邮件附件使用
       - name: Pick latest report
         id: pick
         shell: bash
@@ -37,16 +38,16 @@ jobs:
           [ -f logs/cloud_${YM}.csv ]  && echo "cloud=logs/cloud_${YM}.csv"  >> $GITHUB_OUTPUT
           [ -f logs/calib_${YM}.csv ]  && echo "calib=logs/calib_${YM}.csv"  >> $GITHUB_OUTPUT
 
-      - name: Prepare email body
+      # 读取报告并转成单行 HTML（换行-><br/>，转义 <>&）
+      - name: Prepare email body (HTML)
         id: body
         if: ${{ steps.pick.outputs.latest != '' }}
+        shell: bash
         run: |
+          set -e
           FILE="${{ steps.pick.outputs.latest }}"
-          {
-            echo "body<<EOF"
-            cat "$FILE"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          HTML=$(python -c "import html,sys; t=open(r'$FILE','r',encoding='utf-8').read(); print(html.escape(t).replace('\n','<br/>'))")
+          echo "html=${HTML}" >> "$GITHUB_OUTPUT"
 
       - name: Send email (sunset)
         if: ${{ steps.pick.outputs.latest != '' }}
@@ -60,15 +61,17 @@ jobs:
           to: 248882568@qq.com
           from: Sunrise Auto <${{ secrets.QQ_SMTP_USER }}>
           subject: "日落预报 - ${{ steps.pick.outputs.base }}"
-          body: ${{ steps.body.outputs.body }}
+          content_type: text/html
+          body: ${{ steps.body.outputs.html }}
           attachments: |
             ${{ steps.pick.outputs.latest }}
             ${{ steps.pick.outputs.scores }}
             ${{ steps.pick.outputs.cloud }}
             ${{ steps.pick.outputs.calib }}
 
+      # 失败兜底：没产生日报或流程失败，发告警
       - name: Send failure email
-        if: failure() || ${{ steps.pick.outputs.latest == '' }}
+        if: ${{ failure() || steps.pick.outputs.latest == '' }}
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.qq.com
