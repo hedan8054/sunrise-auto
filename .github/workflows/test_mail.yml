@@ -1,0 +1,19 @@
+name: Test Mail
+on: workflow_dispatch
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.qq.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.QQ_SMTP_USER }}
+          password: ${{ secrets.QQ_SMTP_PASS }}
+          subject: "SMTP 测试 - ${{ github.repository }}"
+          to: 248882568@qq.com
+          from: Sunrise Auto <${{ secrets.QQ_SMTP_USER }}>
+          body: "这是一封来自 GitHub Actions 的测试邮件。"
