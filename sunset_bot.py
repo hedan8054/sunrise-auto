@@ -383,7 +383,7 @@ def build_forecast_text(total, det, sun_t, extra, event_name="日落"):
     lines = [
         f"拍摄指数：{total}/18",
         f"地点：{CONFIG['location']['name']}  (lat={LAT}, lon={LON})",
-        f"{event_name}：{sun_t:%H:%M}",
+        f"{event_name}：{sun_t:%m月%d日 %H:%M}",
         ""
     ]
     for name, val, pts in det:
@@ -448,7 +448,7 @@ def gen_scene_desc(score5, kv, sun_t, event_name="日落"):
 
     return (
         f"【直观判断】评分：{score5:.1f}/5 —— {grade}\n"
-        f"{event_name}：{sun_t:%H:%M}\n"
+        f"{event_name}：{sun_t:%m月%d日 %H:%M}\n"
         f"- 低云：{lc:.0f}%（{lc_level}）— {low_text}\n"
         f"- 中/高云：{mh:.0f}%（{mh_level}）— {fire_text}\n"
         f"- 云底高度：{cb_show}（{cb_level}）— {cb_text}\n"
