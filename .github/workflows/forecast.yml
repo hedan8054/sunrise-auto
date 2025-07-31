@@ -41,12 +41,18 @@ jobs:
       - name: Prepare email body
         id: body
         if: ${{ steps.pick.outputs.latest != '' }}
+        shell: bash
         run: |
+          set -e
           FILE="${{ steps.pick.outputs.latest }}"
+      
+          # 生成不容易和正文冲突的分隔符
+          DELIM="SUNRISE_$(date +%s%N)"
+      
           {
-            echo "body<<EOF"
+            echo "body<<$DELIM"
             cat "$FILE"
-            echo "EOF"
+            echo "$DELIM"
           } >> "$GITHUB_OUTPUT"
 
       - name: Send email (sunrise)
