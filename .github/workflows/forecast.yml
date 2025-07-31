@@ -45,15 +45,9 @@ jobs:
         run: |
           set -e
           FILE="${{ steps.pick.outputs.latest }}"
-      
-          # 生成不容易和正文冲突的分隔符
-          DELIM="SUNRISE_$(date +%s%N)"
-      
-          {
-            echo "body<<$DELIM"
-            cat "$FILE"
-            echo "$DELIM"
-          } >> "$GITHUB_OUTPUT"
+          # 把文件内容编码成一行（按 GitHub 输出规范转义 % \r \n）
+          ENCODED="$(sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e 's/\n/%0A/g' "$FILE")"
+          echo "body=${ENCODED}" >> "$GITHUB_OUTPUT"
 
       - name: Send email (sunrise)
         if: ${{ steps.pick.outputs.latest != '' }}
