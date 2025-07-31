@@ -45,8 +45,8 @@ jobs:
         run: |
           set -e
           FILE="${{ steps.pick.outputs.latest }}"
-          # 把文件内容编码成一行（按 GitHub 输出规范转义 % \r \n）
-          ENCODED="$(sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e 's/\n/%0A/g' "$FILE")"
+          # 逐行读取并转义：% -> %25, \r -> %0D, 每行之间插入 %0A
+          ENCODED="$(awk 'BEGIN{ORS="";} {gsub(/%/,"%25"); gsub(/\r/,"%0D"); printf "%s%%0A",$0} END{print ""}' "$FILE")"
           echo "body=${ENCODED}" >> "$GITHUB_OUTPUT"
 
       - name: Send email (sunrise)
