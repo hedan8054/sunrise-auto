@@ -38,17 +38,23 @@ jobs:
           [ -f logs/cloud_${YM}.csv ]  && echo "cloud=logs/cloud_${YM}.csv"  >> $GITHUB_OUTPUT
           [ -f logs/calib_${YM}.csv ]  && echo "calib=logs/calib_${YM}.csv"  >> $GITHUB_OUTPUT
 
-      - name: Prepare email body
+      # 读取报告并转成单行 HTML（换行-><br/>，转义特殊字符）
+      - name: Prepare email body (HTML)
         id: body
         if: ${{ steps.pick.outputs.latest != '' }}
         shell: bash
         run: |
           set -e
           FILE="${{ steps.pick.outputs.latest }}"
-          # 逐行读取并转义：% -> %25, \r -> %0D, 每行之间插入 %0A
-          ENCODED="$(awk 'BEGIN{ORS="";} {gsub(/%/,"%25"); gsub(/\r/,"%0D"); printf "%s%%0A",$0} END{print ""}' "$FILE")"
-          echo "body=${ENCODED}" >> "$GITHUB_OUTPUT"
-
+          HTML=$(python - <<'PY' "$FILE"
+      import sys, html
+      txt = open(sys.argv[1], 'r', encoding='utf-8').read()
+      # 转义 HTML，再把换行替换为 <br/>
+      print(html.escape(txt).replace('\n','<br/>'))
+      PY
+      )
+          echo "html=${HTML}" >> "$GITHUB_OUTPUT"
+      
       - name: Send email (sunrise)
         if: ${{ steps.pick.outputs.latest != '' }}
         uses: dawidd6/action-send-mail@v3
@@ -61,7 +67,8 @@ jobs:
           to: 248882568@qq.com
           from: Sunrise Auto <${{ secrets.QQ_SMTP_USER }}>
           subject: "日出预报 - ${{ steps.pick.outputs.base }}"
-          body: ${{ steps.body.outputs.body }}
+          content_type: text/html
+          body: ${{ steps.body.outputs.html }}
           attachments: |
             ${{ steps.pick.outputs.latest }}
             ${{ steps.pick.outputs.scores }}
