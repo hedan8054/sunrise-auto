@@ -41,9 +41,12 @@ jobs:
         id: body
         if: ${{ steps.pick.outputs.latest != '' }}
         run: |
-          echo "body<<'EOF'" >> $GITHUB_OUTPUT
-          cat "${{ steps.pick.outputs.latest }}" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          FILE="${{ steps.pick.outputs.latest }}"
+          {
+            echo "body<<EOF"
+            cat "$FILE"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Send email (sunset)
         if: ${{ steps.pick.outputs.latest != '' }}
