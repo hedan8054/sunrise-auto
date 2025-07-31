@@ -2,7 +2,8 @@ name: Sunrise Forecast
 
 on:
   schedule:
-    - cron: '30 9 * * *'   # UTC 09:30 = 北京/台北 17:30
+    # 每天北京时间 17:30 运行（UTC 09:30）
+    - cron: '30 9 * * *'
   workflow_dispatch:
 
 jobs:
@@ -21,10 +22,65 @@ jobs:
       - name: Run forecast
         run: python sunrise_bot.py forecast
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      # 选出最新日出报告和当月日志，供邮件附件使用
+      - name: Pick latest report
+        id: pick
+        shell: bash
+        run: |
+          set -e
+          LATEST=$(ls -t out/forecast_*.txt 2>/dev/null | head -n 1 || true)
+          echo "latest=$LATEST" >> $GITHUB_OUTPUT
+          if [ -n "$LATEST" ]; then
+            echo "base=$(basename "$LATEST")" >> $GITHUB_OUTPUT
+          fi
+          YM=$(date +'%Y-%m')
+          [ -f logs/scores_${YM}.csv ] && echo "scores=logs/scores_${YM}.csv" >> $GITHUB_OUTPUT
+          [ -f logs/cloud_${YM}.csv ]  && echo "cloud=logs/cloud_${YM}.csv"  >> $GITHUB_OUTPUT
+          [ -f logs/calib_${YM}.csv ]  && echo "calib=logs/calib_${YM}.csv"  >> $GITHUB_OUTPUT
+
+      - name: Prepare email body
+        id: body
+        if: ${{ steps.pick.outputs.latest != '' }}
+        run: |
+          echo "body<<'EOF'" >> $GITHUB_OUTPUT
+          cat "${{ steps.pick.outputs.latest }}" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Send email (sunrise)
+        if: ${{ steps.pick.outputs.latest != '' }}
+        uses: dawidd6/action-send-mail@v3
         with:
-          name: forecast_outputs
-          path: |
-            out/
-            logs/
+          server_address: smtp.qq.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.QQ_SMTP_USER }}
+          password: ${{ secrets.QQ_SMTP_PASS }}
+          to: 248882568@qq.com
+          from: Sunrise Auto <${{ secrets.QQ_SMTP_USER }}>
+          subject: "日出预报 - ${{ steps.pick.outputs.base }}"
+          body: ${{ steps.body.outputs.body }}
+          attachments: |
+            ${{ steps.pick.outputs.latest }}
+            ${{ steps.pick.outputs.scores }}
+            ${{ steps.pick.outputs.cloud }}
+            ${{ steps.pick.outputs.calib }}
+
+      # 失败兜底：没产生日报或流程失败，发告警
+      - name: Send failure email
+        if: failure() || ${{ steps.pick.outputs.latest == '' }}
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.qq.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.QQ_SMTP_USER }}
+          password: ${{ secrets.QQ_SMTP_PASS }}
+          to: 248882568@qq.com
+          from: Sunrise Auto <${{ secrets.QQ_SMTP_USER }}>
+          subject: "【告警】日出预报任务失败 - ${{ github.repository }}"
+          body: |
+            任务失败或未产生日出报告。
+            仓库: ${{ github.repository }}
+            分支: ${{ github.ref_name }}
+            运行: ${{ github.run_id }}
+            请在 Actions 查看日志。
