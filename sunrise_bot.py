@@ -346,6 +346,41 @@ def calc_score(vals, cloud_base_m, cfg):
     return total, detail
 
 # ----------------- 文案 -----------------
+from scene_labels import load_labels, pick_labels, to_xhs_caption
+
+# 1) 组装用于打标的“小时数组”（你已有目标整点 idx，可把它和前后小时取出来）
+hrs_metrics = []
+for j in [idx-1, idx, idx+1]:
+    if 0 <= j < len(om["hourly"]["time"]):
+        hrs_metrics.append({
+            "low": om["hourly"]["cloudcover_low"][j],
+            "mid": om["hourly"]["cloudcover_mid"][j],
+            "high": om["hourly"]["cloudcover_high"][j],
+            "cloud_base_m": cb if j==idx else cb,   # 你也可以都用 cb
+            "vis_km": (om["hourly"]["visibility"][j] or 0)/1000.0,
+            "wind": om["hourly"]["windspeed_10m"][j],
+            "precip": om["hourly"]["precipitation"][j],
+            "dp": om["hourly"]["temperature_2m"][j] - om["hourly"]["dewpoint_2m"][j]
+        })
+
+labels_lib = load_labels("scene_labels.yaml")
+top_tags = pick_labels(hrs_metrics, labels_lib, topk=6)
+
+# 可读文案（小红书）
+metrics_show = {
+    "low": vals["low"],
+    "mh": max(vals["mid"], vals["high"]),
+    "cloud_base_m": cb if cb is not None else "未知",
+    "vis_km": (vals["vis"] or 0)/1000.0,
+    "wind": vals["wind"],
+    "precip": vals["precip"],
+    "dp": vals["t"] - vals["td"],
+}
+xhs_text = to_xhs_caption("日出", f"{sun_exact:%m月%d日 %H:%M}", CONFIG['location']['name'], score5, metrics_show, top_tags)
+
+# 把 xhs_text 附在报告里或另存
+print("\n【场景标签】", " / ".join(top_tags))
+print("\n【小红书文案】\n" + xhs_text)
 def build_forecast_text(total, det, sun_t, extra):
     lines = [
         f"【日出预报 | 明早 {sun_t:%m月%d日}】拍摄指数：{total}/18",
