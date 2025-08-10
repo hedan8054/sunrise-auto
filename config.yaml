@@ -13,6 +13,11 @@ scoring:
   precip_mm: [0.1, 1.0]         # <0.1mm=2分；0.1~1mm=1分；>=1mm=0分
 
 # 低云墙模型参数（多点采样，而非卫星）
+coast_normal_deg: 90          # 岸线法向角度（度），用于“上/离岸风”判断
+cloudbase_coef_m_per_C: 125   # 云底估算系数 m/℃（可后续用历史校准更新）
+sector_offsets_deg: [-20, -10, 0, 10, 20]
+sector_dists_km: [20, 40, 60]
+
 cloudwall:
   sample_km: [20, 50, 80, 120]  # 从站点沿日出/日落方向取的采样距离
   sunrise_azimuth: 90           # 日出方向（大致东方），可按季节再微调
