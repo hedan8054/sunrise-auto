@@ -15,7 +15,7 @@ warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from scene_labeler import Inputs as SceneInputs, generate_scene
-
+import math, numpy as np
 # ----------------- 全局配置 -----------------
 TZ = pytz.timezone("Asia/Shanghai")
 CONFIG = yaml.safe_load(open("config.yaml", "r", encoding="utf-8"))
@@ -23,6 +23,96 @@ CONFIG = yaml.safe_load(open("config.yaml", "r", encoding="utf-8"))
 LAT = CONFIG["location"]["lat"]
 LON = CONFIG["location"]["lon"]
 MB_API_KEY = os.getenv("MB_API_KEY", "").strip()
+def _deg2rad(x): return x*math.pi/180.0
+def _rad2deg(x): return x*180.0/math.pi
+
+def solar_azimuth(dt_local, lat, lon):
+    """简化太阳方位角（度）。精度对±1~2°即可，不影响扇区筛选。
+    公式为近似版；如你已有天文库，可替换为更精确实现。"""
+    # 以地方时近似使用
+    d = (dt_local - dt_local.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)).total_seconds()/86400.0
+    B = 2*math.pi*(d-81)/364
+    EoT = 9.87*math.sin(2*B) - 7.53*math.cos(B) - 1.5*math.sin(B)  # 分
+    LSTM = 120  # 东八区 * 15 = 120
+    TC = 4*(lon - LSTM) + EoT                  # 分
+    LST = dt_local.hour + dt_local.minute/60 + dt_local.second/3600 + TC/60.0
+    HRA = 15*(LST-12)                          # 时角
+    dec = 23.45*math.sin(_deg2rad(360*(284+d)/365.0))  # 太阳赤纬（简化）
+    latr, decr, HRAr = _deg2rad(lat), _deg2rad(dec), _deg2rad(HRA)
+    # 太阳高度角
+    sin_alt = math.sin(latr)*math.sin(decr) + math.cos(latr)*math.cos(decr)*math.cos(HRAr)
+    alt = math.asin(max(-1,min(1,sin_alt)))
+    # 方位角（0=北，顺时针），再换成“面向海的罗盘角”即可
+    cos_A = (math.sin(decr)-math.sin(latr)*math.sin(alt)) / (math.cos(latr)*math.cos(alt)+1e-9)
+    cos_A = max(-1,min(1,cos_A))
+    A = math.acos(cos_A)
+    if HRA > 0: A = 2*math.pi - A
+    return _rad2deg(A)  # 0~360°
+
+def sector_stats(samples_dict, sun_az, half_angle=35):
+    """
+    samples_dict: 你已有的“多点样本”解析结果（半径->沿不同方位的低云%列表）
+      例：{20: [(az1,lc1),(az2,lc2),...], 50:[...], ...}
+    sun_az: 太阳方位角（度）
+    返回：sector_low_min, sector_low_mean, frag_std
+    """
+    sector_vals = []
+    by_radius = {}
+    for r, arr in samples_dict.items():
+        vals = []
+        for az, lc in arr:
+            # 取与太阳方位差在 half_angle 内的点
+            d = abs((az - sun_az + 180) % 360 - 180)
+            if d <= half_angle and lc is not None:
+                vals.append(lc)
+        if vals:
+            by_radius[r] = vals
+            sector_vals += vals
+
+    if not sector_vals:
+        return None, None, None
+
+    sector_low_min  = float(np.percentile(sector_vals, 10))  # 抗极端：用P10近似“最薄处”
+    sector_low_mean = float(np.mean(sector_vals))
+    # 碎片度：同一扇区内跨半径的波动（半径均值的 std）
+    rad_means = [np.mean(v) for v in by_radius.values() if len(v)>=1]
+    frag_std  = float(np.std(rad_means)) if len(rad_means)>=2 else 0.0
+    return sector_low_min, sector_low_mean, frag_std
+
+def wind_coast_factor(wind_dir_deg, wind_ms, coast_az_deg, ok_range=(2.0,8.0)):
+    """风向与海岸线法向夹角越小越有利（被吹开）；风速处于适宜范围更加分。"""
+    if wind_dir_deg is None or wind_ms is None:
+        return 0.0
+    # 取与 coast_az 的最小夹角（0~180）
+    ang = abs((wind_dir_deg - coast_az_deg + 180) % 360 - 180)
+    a = max(0.0, 1.0 - ang/90.0)  # 0°最佳→1，90°→0
+    v_ok = 1.0 if (ok_range[0] <= wind_ms <= ok_range[1]) else 0.5 if (wind_ms>0) else 0.0
+    return a * v_ok  # 0~1
+
+def tianchuang_factor(cfg, sector_min, sector_mean, frag_std, wind_fac):
+    """天窗因子 0~1：越大越容易有缝。"""
+    if sector_min is None:
+        return 0.0
+    # 扇区“越薄越好”：把低云%映射成“透明度”分
+    # min/mean 两个量都做(100-lc)/100 的正向值
+    sec_min_score  = max(0.0, min(1.0, (100.0 - sector_min)/100.0))
+    sec_mean_score = max(0.0, min(1.0, (100.0 - sector_mean)/100.0))
+    # 碎片度：经验上 8~20 属“明显破碎”，做个 0~1 归一
+    frag_score = max(0.0, min(1.0, frag_std / 20.0))
+    w = cfg["scene_tweaks"]["weights"]
+    tc = w["frag"]*frag_score + w["sector"]*0.5*(sec_min_score+sec_mean_score) + w["wind"]*wind_fac
+    return max(0.0, min(1.0, tc))
+
+def occlusion_discount(tc, cfg):
+    """根据天窗因子给低云遮挡项打折（返回0.6~1.0之间）。"""
+    lo, hi = cfg["scene_tweaks"]["occlusion_discount_range"]
+    thr = cfg["scene_tweaks"]["tianchuang_threshold"]
+    if tc <= thr: 
+        return 1.0
+    # 线性映射：tc=thr→1.0；tc=1→lo（更强折扣）
+    k = 1.0 - (tc-thr)/(1.0-thr) * (1.0 - lo)
+    return max(lo, min(hi, k))
+
 
 # ----------------- 基础工具 -----------------
 def now():
