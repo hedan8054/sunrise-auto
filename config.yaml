@@ -47,3 +47,5 @@ scene_tweaks:
     wind: 0.20                      # 风向修正权重
   tianchuang_threshold: 0.55        # 天窗因子阈值（>阈值算“有缝”）
   occlusion_discount_range: [0.6, 0.85] # 有缝时对低云遮挡项打折的系数区间
+output:
+  style: story   # story | data
