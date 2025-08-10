@@ -494,8 +494,9 @@ def run_forecast():
     kv = {k: v for k, v, _ in det}
     scene_txt = (
         gen_scene_desc(score5, kv, sun_exact)
-        + f"\n- 低云墙风险（模型12h）：{risk_simple_text}"
-        + f"\n- 低云墙预警（模型多点）：{risk_model_text}"
+        + f"\n- 低云墙风险（模型12h）：{risk_text}"
+        + f"\n- 天窗因子：{reason_tc}"
+        # 若你还有“低云墙预警（模型多点）”那一行，可以保留或并列
     )
 
     # 新增：场景标签 + 画面感文案
