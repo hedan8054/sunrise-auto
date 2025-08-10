@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-sunrise_bot.py （无卫星版 + 云底高度自动校准，修复None格式化异常）
-
+sunrise_bot.py （无卫星版 + 场景标签）
 模式：
-  python sunrise_bot.py forecast
-  python sunrise_bot.py nightcheck
-  python sunrise_bot.py lastcheck
+  python sunrise_bot.py forecast    # 下午预测（日出评分+文案）
+  python sunrise_bot.py nightcheck  # 22:00 夜检（记录低云墙指数-模型）
+  python sunrise_bot.py lastcheck   # 03:30 凌晨检（记录低云墙指数-模型）
 """
 
-import os, sys, json, yaml, math, glob
-import datetime as dt
-
-import requests
-import pandas as pd
-import numpy as np
-import pytz
-import warnings, urllib3
+import os, sys, json, yaml, math, datetime as dt
+import requests, pandas as pd, numpy as np
+import pytz, warnings, urllib3
 warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+from scene_labeler import Inputs as SceneInputs, generate_scene
 
 # ----------------- 全局配置 -----------------
 TZ = pytz.timezone("Asia/Shanghai")
@@ -26,10 +22,9 @@ CONFIG = yaml.safe_load(open("config.yaml", "r", encoding="utf-8"))
 
 LAT = CONFIG["location"]["lat"]
 LON = CONFIG["location"]["lon"]
-
 MB_API_KEY = os.getenv("MB_API_KEY", "").strip()
 
-# ----------------- 小工具 -----------------
+# ----------------- 基础工具 -----------------
 def now():
     return dt.datetime.now(TZ)
 
@@ -49,15 +44,6 @@ def save_report(name: str, text: str):
     with open(fname, "w", encoding="utf-8") as f:
         f.write(text)
 
-### FIX_FMT: 安全格式化函数 ###
-def fmt(v, spec=".0f", na="NA"):
-    try:
-        if v is None or (isinstance(v, float) and (np.isnan(v) or np.isinf(v))):
-            return na
-        return format(v, spec)
-    except Exception:
-        return na
-
 # ----------------- 日出时间 -----------------
 def sunrise_time():
     try:
@@ -69,7 +55,9 @@ def sunrise_time():
     except Exception as e:
         print("[WARN] sunrise-sunset API 失败，使用默认 06:00：", e)
         t = now().replace(hour=6, minute=0, second=0, microsecond=0) + dt.timedelta(days=1)
-    return t, t.replace(minute=0, second=0, microsecond=0)
+    t_exact = t
+    t_hour  = t_exact.replace(minute=0, second=0, microsecond=0)
+    return t_exact, t_hour
 
 # ----------------- open-meteo -----------------
 def open_meteo(lat=None, lon=None):
@@ -121,20 +109,17 @@ def mb_point_lowcloud(lat, lon, when_hour):
                f"?apikey={MB_API_KEY}&lat={lat:.4f}&lon={lon:.4f}"
                "&format=json&tz=Asia/Shanghai")
         js = requests.get(url, timeout=30).json()
-
         data = js.get("data_1h") or js.get("data_hourly") or {}
         times = data.get("time") or data.get("time_local") or data.get("time_iso8601") or []
         tgt = when_hour.strftime("%Y-%m-%d %H:00")
         if tgt not in times:
             return None
         idx = times.index(tgt)
-
         def pick(keys, default=None):
             for k in keys:
                 if k in data:
                     return data[k][idx]
             return default
-
         low  = pick(["low_clouds", "low_cloud_cover", "cloudcover_low"])
         base = pick(["cloud_base", "cloudbase", "cloud_base_height"])
         return {"low_cloud": low, "cloud_base": base}
@@ -142,9 +127,10 @@ def mb_point_lowcloud(lat, lon, when_hour):
         print("[WARN] meteoblue point API 失败：", e)
         return None
 
-# ----------------- 经纬度偏移 -----------------
+# ----------------- 多点取样（低云墙预警） -----------------
 def offset_latlon(lat, lon, bearing_deg, dist_km):
     R = 6371.0
+    import math
     brng = math.radians(bearing_deg)
     lat1 = math.radians(lat); lon1 = math.radians(lon)
     lat2 = math.asin(math.sin(lat1)*math.cos(dist_km/R) +
@@ -153,89 +139,10 @@ def offset_latlon(lat, lon, bearing_deg, dist_km):
                              math.cos(lat1)*math.cos(dist_km/R)-math.sin(lat1)*math.sin(lat2))
     return math.degrees(lat2), math.degrees(lon2)
 
-# ----------------- 云底估算 & 自动校准 -----------------
-def estimate_cloud_base_from_dp(dp_c, coef):
-    if dp_c is None or dp_c <= 0 or coef is None:
-        return None
-    return dp_c * coef
-
-def auto_calibrate_coef():
-    cfg = CONFIG.get("cloudbase_estimate", {})
-    default_coef = cfg.get("default_coef_m_per_deg", 125)
-    min_samples  = cfg.get("min_samples", 10)
-    max_days     = cfg.get("max_window_days", 45)
-    clip_min     = cfg.get("clip_min", 60)
-    clip_max     = cfg.get("clip_max", 200)
-
-    tpl = CONFIG["paths"]["log_scores"]
-    pattern = tpl.replace("%Y", "*").replace("%m", "*")
-    files = sorted(glob.glob(pattern))
-    if not files:
-        return {"coef_used": default_coef, "coef_new": None, "n": 0,
-                "mae_old": None, "mae_new": None, "reason": "no_history_file"}
-
-    cutoff = now() - dt.timedelta(days=max_days)
-    ratios, errs_old = [], []
-    used = 0
-    for f in files:
-        try:
-            df = pd.read_csv(f, encoding="utf-8-sig")
-        except Exception:
-            continue
-        if "time" not in df.columns: 
-            continue
-        try:
-            df["time"] = pd.to_datetime(df["time"])
-            df = df[df["time"] >= cutoff]
-        except Exception:
-            pass
-        if "云底高度m" not in df.columns or "露点差°C" not in df.columns:
-            continue
-        sub = df[(df["云底高度m"] > 0) & (df["露点差°C"] > 0)]
-        if sub.empty: 
-            continue
-        for _, row in sub.iterrows():
-            cb, dpv = row["云底高度m"], row["露点差°C"]
-            r = cb / dpv
-            if np.isfinite(r) and clip_min <= r <= clip_max:
-                ratios.append(r)
-                used += 1
-                est_old = dpv * default_coef
-                errs_old.append(abs(cb - est_old))
-
-    if used < min_samples:
-        return {"coef_used": default_coef, "coef_new": None, "n": used,
-                "mae_old": float(np.mean(errs_old)) if errs_old else None,
-                "mae_new": None, "reason": f"not_enough_samples({used}/{min_samples})"}
-
-    coef_new = float(np.clip(np.median(ratios), clip_min, clip_max))
-
-    # 重新计算新误差
-    errs_new = []
-    for f in files:
-        try:
-            df = pd.read_csv(f, encoding="utf-8-sig")
-        except Exception:
-            continue
-        if "云底高度m" not in df.columns or "露点差°C" not in df.columns:
-            continue
-        sub = df[(df["云底高度m"] > 0) & (df["露点差°C"] > 0)]
-        for _, row in sub.iterrows():
-            cb, dpv = row["云底高度m"], row["露点差°C"]
-            est_new = dpv * coef_new
-            errs_new.append(abs(cb - est_new))
-
-    return {"coef_used": coef_new, "coef_new": coef_new, "n": used,
-            "mae_old": float(np.mean(errs_old)) if errs_old else None,
-            "mae_new": float(np.mean(errs_new)) if errs_new else None,
-            "reason": "auto_calibrated"}
-
-# ----------------- 低云墙预警 -----------------
 def fallback_cloudwall_model(sun_hour):
     cfg = CONFIG.get("cloudwall", {})
     bearing = cfg.get("sunrise_azimuth", 90)
     dists   = cfg.get("sample_km", [20, 50, 80, 120])
-
     samples = []
     for d in dists:
         plat, plon = offset_latlon(LAT, LON, bearing, d)
@@ -243,56 +150,62 @@ def fallback_cloudwall_model(sun_hour):
         if rec is None:
             om = open_meteo(plat, plon)
             if om is None:
-                samples.append((d, None, None, "none", "no_resp"))
+                samples.append((d, None, None, "om:no_resp"))
                 continue
             times = om["hourly"]["time"]
             tgt = sun_hour.strftime("%Y-%m-%dT%H:00")
             if tgt not in times:
                 idx = min(range(len(times)),
                           key=lambda i: abs(dt.datetime.fromisoformat(times[i]) - sun_hour))
-                flag = "nearest_hour"
+                reason = "om:nearest"
             else:
-                idx = times.index(tgt); flag = "exact_hour"
+                idx = times.index(tgt)
+                reason = "om:exact_hour"
             low_pct = om["hourly"]["cloudcover_low"][idx]
             base_m  = None
-            samples.append((d, low_pct, base_m, "om", flag))
+            samples.append((d, low_pct, base_m, reason))
         else:
-            samples.append((d, rec.get("low_cloud"), rec.get("cloud_base"), "mb", "mb_point"))
-
-    risk = model_lc_risk_v2(samples)
+            samples.append((d, rec.get("low_cloud"), rec.get("cloud_base"), "mb:point"))
+    risk = model_lc_risk_v2([(d,l,b) for d,l,b,_ in samples])
     txt  = risk_text_from_samples(risk, samples)
     return risk, txt
 
 def model_lc_risk_v2(samples):
     if not samples:
         return 1
-    high = sum(1 for _, l, b, _, _ in samples if (l is not None and l >= 50) and (b is None or b < 600))
-    mid  = sum(1 for _, l, b, _, _ in samples if (l is not None and l >= 30) or (b is not None and b < 800))
-    if high >= 1 or mid >= len(samples) * 0.5: return 2
-    if mid >= 1: return 1
+    high = sum(1 for _, l, b in samples if (l is not None and l >= 50) and (b is None or b < 600))
+    mid  = sum(1 for _, l, b in samples if (l is not None and l >= 30) or (b is not None and b < 800))
+    if high >= 1 or mid >= len(samples) * 0.5:
+        return 2
+    if mid >= 1:
+        return 1
     return 0
 
 def risk_text_from_samples(risk, samples):
     stat = {0:"正常(模型)",1:"关注(模型)",2:"预警(模型)"}.get(risk,"?")
-    detail = []
-    for d,l,b,src,why in samples:
-        lp = f"{l:.0f}%" if l is not None else "NA%"
-        bm = f"{int(b)}m" if (b is not None and np.isfinite(b)) else "NA m"
-        detail.append(f"{d}km:{lp} / {bm}[{src}:{why}]")
-    return f"{stat}（samples: " + " | ".join(detail) + "）"
+    def fmt(d,l,b,src):
+        ltxt = f"{l:.0f}%" if l is not None else "NA%"
+        btxt = f"{int(b)}m" if b is not None else "NA m"
+        return f"{d}km:{ltxt} / {btxt}[{src}]"
+    detail = " | ".join([fmt(d,l,b,src) for d,l,b,src in samples])
+    return f"{stat}（samples: {detail}）"
 
-# ----------------- 简易风险 -----------------
+# --------- 简单旧版风险（兼容） ---------
 def model_lc_risk_simple(lc, dp, wind):
-    if lc is None: return 1
-    if lc >= 50 and dp < 2: return 2
-    if lc >= 30: return 1
+    if lc is None:
+        return 1
+    if lc >= 50 and dp < 2:
+        return 2
+    if lc >= 30:
+        return 1
     return 0
 
-RISK_MAP = {0: "正常", 1: "关注", 2: "高风险"}
+RISK_MAP = {0:"正常",1:"关注",2:"高风险"}
 
 # ----------------- 评分逻辑 -----------------
 def score_value(v, bounds):
-    if v is None: return 1
+    if v is None:
+        return 1
     if len(bounds) == 3:
         lo, mid, hi = bounds
         if lo <= v <= mid: return 2
@@ -306,13 +219,10 @@ def score_value(v, bounds):
 
 def calc_score(vals, cloud_base_m, cfg):
     detail, total = [], 0
-
     lc = vals["low"]
     pt = score_value(lc, cfg["low_cloud"]); detail.append(("低云%", lc, pt)); total += pt
-
     mh = max(vals["mid"], vals["high"])
     pt = score_value(mh, cfg["mid_high_cloud"]); detail.append(("中/高云%", mh, pt)); total += pt
-
     if cloud_base_m is None:
         pt, val = 1, -1
     else:
@@ -320,72 +230,32 @@ def calc_score(vals, cloud_base_m, cfg):
         pt = 2 if cloud_base_m > hi else 1 if cloud_base_m > lo else 0
         val = cloud_base_m
     detail.append(("云底高度m", val, pt)); total += pt
-
     vis_km = (vals["vis"] or 0) / 1000.0
     lo, hi = cfg["visibility_km"]
     pt = 2 if vis_km >= hi else 1 if vis_km >= lo else 0
     detail.append(("能见度km", vis_km, pt)); total += pt
-
     w = vals["wind"]
     lo1, lo2, hi2, hi3 = cfg["wind_ms"]
     if lo2 <= w <= hi2: pt = 2
     elif lo1 <= w < lo2 or hi2 < w <= hi3: pt = 1
     else: pt = 0
     detail.append(("风速m/s", w, pt)); total += pt
-
     dp = vals["t"] - vals["td"]
     lo, hi = cfg["dewpoint_diff"]
     pt = 2 if dp >= hi else 1 if dp >= lo else 0
     detail.append(("露点差°C", dp, pt)); total += pt
-
     p = vals.get("precip", 0)
     lo, hi = cfg["precip_mm"]
     pt = 2 if p < lo else 1 if p < hi else 0
     detail.append(("降雨量mm", p, pt)); total += pt
-
     return total, detail
 
 # ----------------- 文案 -----------------
-from scene_labels import load_labels, pick_labels, to_xhs_caption
-
-# 1) 组装用于打标的“小时数组”（你已有目标整点 idx，可把它和前后小时取出来）
-hrs_metrics = []
-for j in [idx-1, idx, idx+1]:
-    if 0 <= j < len(om["hourly"]["time"]):
-        hrs_metrics.append({
-            "low": om["hourly"]["cloudcover_low"][j],
-            "mid": om["hourly"]["cloudcover_mid"][j],
-            "high": om["hourly"]["cloudcover_high"][j],
-            "cloud_base_m": cb if j==idx else cb,   # 你也可以都用 cb
-            "vis_km": (om["hourly"]["visibility"][j] or 0)/1000.0,
-            "wind": om["hourly"]["windspeed_10m"][j],
-            "precip": om["hourly"]["precipitation"][j],
-            "dp": om["hourly"]["temperature_2m"][j] - om["hourly"]["dewpoint_2m"][j]
-        })
-
-labels_lib = load_labels("scene_labels.yaml")
-top_tags = pick_labels(hrs_metrics, labels_lib, topk=6)
-
-# 可读文案（小红书）
-metrics_show = {
-    "low": vals["low"],
-    "mh": max(vals["mid"], vals["high"]),
-    "cloud_base_m": cb if cb is not None else "未知",
-    "vis_km": (vals["vis"] or 0)/1000.0,
-    "wind": vals["wind"],
-    "precip": vals["precip"],
-    "dp": vals["t"] - vals["td"],
-}
-xhs_text = to_xhs_caption("日出", f"{sun_exact:%m月%d日 %H:%M}", CONFIG['location']['name'], score5, metrics_show, top_tags)
-
-# 把 xhs_text 附在报告里或另存
-print("\n【场景标签】", " / ".join(top_tags))
-print("\n【小红书文案】\n" + xhs_text)
 def build_forecast_text(total, det, sun_t, extra):
     lines = [
         f"【日出预报 | 明早 {sun_t:%m月%d日}】拍摄指数：{total}/18",
         f"地点：{CONFIG['location']['name']}  (lat={LAT}, lon={LON})",
-        f"日出：{sun_t:%m月%d日 %H:%M}",
+        f"日出：{sun_t:%H:%M}",
         ""
     ]
     for name, val, pts in det:
@@ -398,59 +268,46 @@ def build_forecast_text(total, det, sun_t, extra):
     return "\n".join(lines)
 
 def gen_scene_desc(score5, kv, sun_t):
-    lc   = kv.get("低云%",      0) or 0
-    mh   = kv.get("中/高云%",    0) or 0
-    cb   = kv.get("云底高度m",   -1)
-    vis  = kv.get("能见度km",    0) or 0
-    wind = kv.get("风速m/s",     0) or 0
-    dp   = kv.get("露点差°C",    0) or 0
-    rp   = kv.get("降雨量mm",    0) or 0
-
-    if lc < 20:   lc_level, low_text = "低","地平线基本通透，太阳能“蹦”出来"
-    elif lc < 40: lc_level, low_text = "中","地平线可能有一条灰带，太阳或从缝隙钻出"
-    elif lc < 60: lc_level, low_text = "偏高","低云偏多，首轮日光可能被挡一部分"
-    else:         lc_level, low_text = "高","一堵低云墙，首轮日光大概率看不到"
-
-    if 20 <= mh <= 60: mh_level, fire_text = "适中","有“云接光”舞台，可能染上粉橙色（小概率火烧云）"
-    elif mh < 20:      mh_level, fire_text = "太少","天空太干净，只有简单渐变色"
-    elif mh <= 80:     mh_level, fire_text = "偏多","云多且厚，色彩可能偏闷"
-    else:              mh_level, fire_text = "很多","厚云盖顶，大概率阴沉"
-
-    if cb is None or cb < 0:
-        cb_level, cb_text, cb_show = "未知","云底数据缺失，可参考凌晨“低云墙预警”","未知"
-    elif cb > 1000:
-        cb_level, cb_text, cb_show = ">1000m","云底较高，多当“天花板”，不挡海平线",f"{cb:.0f}m"
-    elif cb > 500:
-        cb_level, cb_text, cb_show = "500~1000m","可能在海面上方形成一道云棚，注意日出角度",f"{cb:.0f}m"
-    else:
-        cb_level, cb_text, cb_show = "<500m","贴海低云/雾，像拉了窗帘",f"{cb:.0f}m"
-
-    if vis >= 15: vis_level, vis_text = ">15km","空气透明度好，远景清晰，金光反射漂亮"
-    elif vis >= 8: vis_level, vis_text = "8~15km","中等透明度，远景略灰"
-    else:          vis_level, vis_text = "<8km","背景灰蒙蒙，层次差"
-
-    if 2 <= wind <= 5: wind_level, wind_text = "2~5m/s","海面有微波纹，反光好，三脚架稳"
-    elif wind < 2:     wind_level, wind_text = "<2m/s","几乎无风，注意镜头易结露"
-    elif wind <= 8:    wind_level, wind_text = "5~8m/s","风稍大，留意三脚架稳定性"
-    else:              wind_level, wind_text = ">8m/s","大风天，拍摄体验差，器材要护好"
-
-    if dp >= 3:   dp_level, dp_text = "≥3℃","不易起雾"
-    elif dp >= 1: dp_level, dp_text = "1~3℃","稍潮，镜头可能结露"
-    else:         dp_level, dp_text = "<1℃","极易起雾，注意海雾/镜头起雾风险"
-
-    if rp < 0.1:   rp_level, rain_text = "<0.1mm","几乎不会下雨"
-    elif rp < 1:   rp_level, rain_text = "0.1~1mm","可能有零星小雨/毛毛雨"
-    else:          rp_level, rain_text = "≥1mm","有下雨可能，注意防水"
-
-    if score5 >= 4.0:   grade = "建议出发（把握较大）"
+    lc   = kv.get("低云%",0) or 0
+    mh   = kv.get("中/高云%",0) or 0
+    cb   = kv.get("云底高度m",-1)
+    vis  = kv.get("能见度km",0) or 0
+    wind = kv.get("风速m/s",0) or 0
+    dp   = kv.get("露点差°C",0) or 0
+    rp   = kv.get("降雨量mm",0) or 0
+    if lc < 20: lc_level, low_text = "低", "地平线基本通透，太阳能“蹦”出来"
+    elif lc < 40: lc_level, low_text = "中", "地平线可能有一条灰带，太阳或从缝隙钻出"
+    elif lc < 60: lc_level, low_text = "偏高", "低云偏多，首轮日光可能被挡一部分"
+    else: lc_level, low_text = "高", "一堵低云墙，首轮日光大概率看不到"
+    if 20 <= mh <= 60: mh_level, fire_text = "适中", "有“云接光”舞台，可能染上粉橙色（小概率火烧云）"
+    elif mh < 20: mh_level, fire_text = "太少", "天空太干净，只有简单渐变色"
+    elif mh <= 80: mh_level, fire_text = "偏多", "云多且厚，色彩可能偏闷"
+    else: mh_level, fire_text = "很多", "厚云盖顶，大概率阴沉"
+    if cb is None or cb < 0: cb_level, cb_text, cb_show = "未知","云底数据缺失，可参考凌晨“低云墙预警”","未知"
+    elif cb > 1000: cb_level, cb_text, cb_show = ">1000m","云底较高，多当“天花板”，不挡海平线",f"{cb:.0f}m"
+    elif cb > 500:  cb_level, cb_text, cb_show = "500~1000m","可能在海面上方形成一道云棚，注意日出角度",f"{cb:.0f}m"
+    else:           cb_level, cb_text, cb_show = "<500m","贴海低云/雾，像拉了窗帘",f"{cb:.0f}m"
+    if vis >= 15: vis_level, vis_text = ">15km", "空气透明度好，远景清晰，金光反射漂亮"
+    elif vis >= 8: vis_level, vis_text = "8~15km", "中等透明度，远景略灰"
+    else: vis_level, vis_text = "<8km", "背景灰蒙蒙，层次差"
+    if 2 <= wind <= 5: wind_level, wind_text = "2~5m/s", "海面有微波纹，反光好，三脚架稳"
+    elif wind < 2: wind_level, wind_text = "<2m/s", "几乎无风，注意镜头易结露"
+    elif wind <= 8: wind_level, wind_text = "5~8m/s", "风稍大，留意三脚架稳定性"
+    else: wind_level, wind_text = ">8m/s", "大风天，拍摄体验差，器材要护好"
+    if dp >= 3: dp_level, dp_text = "≥3℃", "不易起雾"
+    elif dp >= 1: dp_level, dp_text = "1~3℃", "稍潮，镜头可能结露"
+    else: dp_level, dp_text = "<1℃", "极易起雾，注意海雾/镜头起雾风险"
+    if rp < 0.1: rp_level, rain_text = "<0.1mm","几乎不会下雨"
+    elif rp < 1: rp_level, rain_text = "0.1~1mm","可能有零星小雨/毛毛雨"
+    else: rp_level, rain_text = "≥1mm","有下雨可能，注意防水和收纳镜头"
+    if score5 >= 4.0: grade = "建议出发（把握较大）"
     elif score5 >= 3.0: grade = "可去一搏（不稳）"
     elif score5 >= 2.0: grade = "机会一般（看心情或距离）"
     elif score5 >= 1.0: grade = "概率很小（除非就在附近）"
-    else:               grade = "建议休息（基本无戏）"
-
+    else: grade = "建议休息（基本无戏）"
     return (
         f"【直观判断】评分：{score5:.1f}/5 —— {grade}\n"
-        f"日出：{sun_t:%m月%d日 %H:%M}\n"
+        f"日出：{sun_t:%H:%M}\n"
         f"- 低云：{lc:.0f}%（{lc_level}）— {low_text}\n"
         f"- 中/高云：{mh:.0f}%（{mh_level}）— {fire_text}\n"
         f"- 云底高度：{cb_show}（{cb_level}）— {cb_text}\n"
@@ -460,7 +317,7 @@ def gen_scene_desc(score5, kv, sun_t):
         f"- 露点差：{dp:.1f} ℃（{dp_level}）— {dp_text}"
     )
 
-# ----------------- 运行模式 -----------------
+# ----------------- 主流程 -----------------
 def run_forecast():
     sun_exact, sun_hour = sunrise_time()
 
@@ -468,9 +325,7 @@ def run_forecast():
     if om is None:
         msg = "[ERR] open-meteo 数据为空，无法评分。"
         print(msg); save_report("forecast_error", msg)
-        log_csv(CONFIG["paths"]["log_scores"], {
-            "time": now(), "mode": "forecast", "score": -1, "error": "open-meteo no data"
-        })
+        log_csv(CONFIG["paths"]["log_scores"], {"time": now(), "mode":"forecast", "score":-1, "error":"open-meteo no data"})
         return
 
     hrs = om["hourly"]["time"]
@@ -492,63 +347,55 @@ def run_forecast():
         precip = om["hourly"]["precipitation"][idx]
     )
 
-    metar_cb = parse_cloud_base(metar("ZGSZ"))
-    dp_now   = vals["t"] - vals["td"]
+    cb = parse_cloud_base(metar("ZGSZ"))
+    total, det = calc_score(vals, cb, CONFIG["scoring"])
 
-    calib = auto_calibrate_coef()
-    coef_used = calib["coef_used"]
-    est_cb = estimate_cloud_base_from_dp(dp_now, coef_used)
-    cb_final = metar_cb if metar_cb is not None else est_cb
-
-    total, det = calc_score(vals, cb_final, CONFIG["scoring"])
-
-    risk_simple = model_lc_risk_simple(vals["low"], dp_now, vals["wind"])
+    # 风险：简易 + 多点
+    risk_simple = model_lc_risk_simple(vals["low"], vals["t"] - vals["td"], vals["wind"])
     risk_simple_text = f"{RISK_MAP[risk_simple]}（模型12h）"
     risk_model, risk_model_text = fallback_cloudwall_model(sun_hour)
 
     score5 = round(total / (3 * len(det)) * 5, 1)
     kv = {k: v for k, v, _ in det}
-
-    mae_old_s = fmt(calib.get("mae_old"), ".0f")
-    mae_new_s = fmt(calib.get("mae_new"), ".0f")
-    metar_cb_s = fmt(metar_cb, ".0f")
-    est_cb_s   = fmt(est_cb, ".0f")
-
     scene_txt = (
         gen_scene_desc(score5, kv, sun_exact)
         + f"\n- 低云墙风险（模型12h）：{risk_simple_text}"
         + f"\n- 低云墙预警（模型多点）：{risk_model_text}"
-        + f"\n- 云底估算参数：coef={coef_used:.1f} m/℃（样本={calib['n']}, 原MAE={mae_old_s}m, 新MAE={mae_new_s}m, 原因={calib['reason']}）"
-        + f"\n  ※ METAR云底={metar_cb_s}m，估算云底={est_cb_s}m"
     )
 
-    text = scene_txt + "\n\n" + build_forecast_text(total, det, sun_exact, extra={})
+    # 新增：场景标签 + 画面感文案
+    scene_in = SceneInputs(
+        event="sunrise",
+        time_str=sun_exact.strftime("%m月%d日 %H:%M"),
+        place=CONFIG["location"]["name"],
+        lat=LAT, lon=LON,
+        low=vals["low"], mid=vals["mid"], high=vals["high"],
+        cloud_base_m=cb,
+        vis_km=(vals["vis"] or 0)/1000.0,
+        wind_ms=vals["wind"],
+        precip_mm=vals.get("precip", 0) or 0,
+        dp_c=vals["t"] - vals["td"],
+        lc_risk_simple=risk_simple,
+        lc_risk_multi=risk_model
+    )
+    _, pretty_copy = generate_scene(scene_in)
+
+    text = scene_txt + "\n\n" + pretty_copy + "\n\n" + build_forecast_text(total, det, sun_exact, extra={})
     print(text)
     save_report("forecast", text)
-
     log_csv(CONFIG["paths"]["log_scores"], {
-        "time": now(), "mode": "forecast", "score": total, "score5": score5,
+        "time": now(), "mode":"forecast", "score": total, "score5": score5,
         **{k: v for k, v, _ in det},
         "risk_model_simple": risk_simple,
-        "risk_model_multi": risk_model,
-        "metar_cb": metar_cb if metar_cb is not None else np.nan,
-        "est_cb": est_cb if est_cb is not None else np.nan,
-        "coef_used": coef_used,
-        "calib_samples": calib["n"],
-        "calib_reason": calib["reason"]
+        "risk_model_multi": risk_model
     })
-    log_csv(CONFIG["paths"]["log_calib"], {"time": now(), **calib})
 
 def run_check(mode: str):
     _, sun_hour = sunrise_time()
     risk, txt = fallback_cloudwall_model(sun_hour)
     msg = f"{mode}: risk={risk}, {txt}"
-    print(msg)
-    save_report(mode, msg)
-    log_csv(CONFIG["paths"]["log_cloud"], {
-        "time": now(), "mode": mode,
-        "cloudwall_score": risk, "text": txt
-    })
+    print(msg); save_report(mode, msg)
+    log_csv(CONFIG["paths"]["log_cloud"], {"time": now(), "mode":mode, "cloudwall_score":risk, "text":txt})
 
 # ----------------- 主入口 -----------------
 if __name__ == "__main__":
@@ -565,8 +412,5 @@ if __name__ == "__main__":
             print("Usage: python sunrise_bot.py [forecast|nightcheck|lastcheck]")
     except Exception as e:
         err_msg = f"[FATAL] {mode} 运行异常：{repr(e)}"
-        print(err_msg)
-        save_report(f"{mode}_error", err_msg)
-        log_csv(CONFIG["paths"]["log_scores"], {
-            "time": now(), "mode": mode, "score": -1, "error": repr(e)
-        })
+        print(err_msg); save_report(f"{mode}_error", err_msg)
+        log_csv(CONFIG["paths"]["log_scores"], {"time": now(), "mode": mode, "score": -1, "error": repr(e)})
