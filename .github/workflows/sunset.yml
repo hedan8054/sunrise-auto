@@ -50,7 +50,8 @@ jobs:
         run: |
           set -e
           FILE="${{ steps.pick.outputs.latest }}"
-          HTML=$(python - <<'PY' "$FILE"
+          HTML=$(python -c "import sys,html; txt=open(sys.argv[1],'r',encoding='utf-8').read(); print(html.escape(txt).replace('\n','<br/>'))" "$FILE")
+          echo "html=$HTML" >> "$GITHUB_OUTPUT"
 import sys, html
 txt = open(sys.argv[1], 'r', encoding='utf-8').read()
 print(html.escape(txt).replace('\n','<br/>'))
