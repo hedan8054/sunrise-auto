@@ -7,7 +7,7 @@ sunset_bot.py
 """
 
 import os, sys, json, yaml, datetime as dt
-import requests, pandas as pd, numpy as np
+import requests, pandas as pd, math, numpy as np
 import pytz, warnings, urllib3
 warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -47,7 +47,7 @@ def open_meteo():
         "https://api.open-meteo.com/v1/forecast"
         f"?latitude={LAT}&longitude={LON}"
         "&hourly=cloudcover_low,cloudcover_mid,cloudcover_high,visibility,"
-        "temperature_2m,dewpoint_2m,windspeed_10m,precipitation"
+        "temperature_2m,dewpoint_2m,windspeed_10m,winddirection_10m,precipitation"
         "&forecast_days=2&timezone=Asia%2FShanghai"
     )
     try:
@@ -229,7 +229,139 @@ def gen_scene_desc(score5, kv, sun_t, event_name="日落"):
         f"- 降雨：{rp:.1f} mm（{rp_level}）— {rain_text}\n"
         f"- 露点差：{dp:.1f} ℃（{dp_level}）— {dp_text}"
     )
+# ======= Tianchuang Factor（无卫星版：扇区×碎片度×风向） =======
+def offset_latlon(lat, lon, bearing_deg, dist_km):
+    R = 6371.0
+    brng = math.radians(bearing_deg)
+    lat1 = math.radians(lat); lon1 = math.radians(lon)
+    lat2 = math.asin(math.sin(lat1)*math.cos(dist_km/R) +
+                     math.cos(lat1)*math.sin(dist_km/R)*math.cos(brng))
+    lon2 = lon1 + math.atan2(math.sin(brng)*math.sin(dist_km/R)*math.cos(lat1),
+                             math.cos(dist_km)*1e-12 + math.cos(lat1)*math.cos(lat2) - math.sin(lat1)*math.sin(lat2))
+    return math.degrees(lat2), math.degrees(lon2)
 
+def _open_meteo_point_at_hour(lat, lon, target_hour):
+    """读取某点在 target_hour 的 open-meteo，返回 dict 或 None"""
+    url = (
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={lat:.4f}&longitude={lon:.4f}"
+        "&hourly=cloudcover_low,cloudcover_mid,cloudcover_high,visibility,"
+        "temperature_2m,dewpoint_2m,windspeed_10m,winddirection_10m,precipitation"
+        "&forecast_days=2&timezone=Asia%2FShanghai"
+    )
+    try:
+        r = requests.get(url, timeout=20)
+        r.raise_for_status()
+        js = r.json()
+        hrs = js.get("hourly", {}).get("time", [])
+        tgt = target_hour.strftime("%Y-%m-%dT%H:00")
+        if not hrs:
+            return None
+        if tgt in hrs:
+            idx = hrs.index(tgt)
+        else:
+            idx = min(range(len(hrs)), key=lambda i: abs(dt.datetime.fromisoformat(hrs[i]) - target_hour))
+        H = js["hourly"]
+        return {
+            "low":   H["cloudcover_low"][idx],
+            "mid":   H["cloudcover_mid"][idx],
+            "high":  H["cloudcover_high"][idx],
+            "vis":   H["visibility"][idx],
+            "t":     H["temperature_2m"][idx],
+            "td":    H["dewpoint_2m"][idx],
+            "wind":  H["windspeed_10m"][idx],
+            "wdir":  H["winddirection_10m"][idx],
+            "precip":H["precipitation"][idx]
+        }
+    except Exception:
+        return None
+
+def _sample_sector_lows(sun_hour, azimuth_deg, radii_km):
+    lows = []
+    for d in radii_km:
+        plat, plon = offset_latlon(LAT, LON, azimuth_deg, d)
+        rec = _open_meteo_point_at_hour(plat, plon, sun_hour)
+        lows.append(rec["low"] if rec else None)
+    # 清理 None
+    lows_clean = [x for x in lows if x is not None]
+    return lows, lows_clean
+
+def _compute_frag_term(lows_clean):
+    """用径向样本的标准差/均值作为碎片度代理，0~1 归一。"""
+    if len(lows_clean) < 2:
+        return 0.0
+    m = float(np.mean(lows_clean)) or 1e-6
+    sd = float(np.std(lows_clean))
+    # 云量在 0-100%，sd/m 最大大约 < 1；截断到 0~1
+    return max(0.0, min(1.0, sd / max(10.0, m)))
+
+def _compute_sector_term(lows_clean):
+    """用 min/mean 反映扇区里是否有低值漏斗：min 越低 → 越可能有缝。"""
+    if not lows_clean:
+        return 0.0
+    mn = float(np.min(lows_clean)); m = float(np.mean(lows_clean)) or 1e-6
+    ratio = mn / m  # 0~1
+    # 我们要“有缝强”，所以用 1 - ratio
+    return max(0.0, min(1.0, 1.0 - ratio))
+
+def _compute_wind_term(wind_ms, wdir_deg):
+    """当风速在有利范围内，且风向与海岸法向（coast_azimuth）接近（±45°），认为更容易开缝。"""
+    cfg = CONFIG.get("scene_tweaks", {})
+    lo, hi = cfg.get("wind_ok_range_ms", [2.0, 8.0])
+    if wind_ms is None or wdir_deg is None:
+        return 0.0
+    if not (lo <= wind_ms <= hi):
+        return 0.0
+    coast = cfg.get("coast_azimuth_deg", 110.0)
+    # 计算与海岸法向夹角（0°最好，90°最差）
+    diff = abs((wdir_deg - coast + 180) % 360 - 180)
+    if diff >= 90:
+        return 0.0
+    # 线性映射到 0~1（0→90°）
+    return max(0.0, 1.0 - diff / 90.0)
+
+def compute_tianchuang_and_discount(sun_hour, event="sunrise", fallback_wind=None, fallback_wdir=None):
+    """
+    返回 (T, has_window(bool), k折扣, 解释字符串, 采样串)
+    has_window=True 时，低云将按 k(0.6~0.85) 打折用于评分。
+    """
+    st = CONFIG.get("scene_tweaks", {})
+    radii = st.get("sector_radii_km", [20, 50, 80, 120])
+    half_angle = st.get("sector_half_angle_deg", 35)
+    weights = st.get("weights", {"frag":0.45,"sector":0.35,"wind":0.20})
+    threshold = st.get("tianchuang_threshold", 0.55)
+    kmin, kmax = st.get("occlusion_discount_range", [0.6, 0.85])
+
+    # 方位：日出/日落大致方位
+    azi = CONFIG.get("cloudwall", {}).get("sunrise_azimuth" if event=="sunrise" else "sunset_azimuth", 90 if event=="sunrise" else 270)
+
+    # 1) 扇区采样（沿方位的多半径）
+    lows, lows_clean = _sample_sector_lows(sun_hour, azi, radii)
+
+    frag_term = _compute_frag_term(lows_clean)
+    sector_term = _compute_sector_term(lows_clean)
+
+    # 2) 近地风（用主点的 open-meteo；必要时用 fallback）
+    main = _open_meteo_point_at_hour(LAT, LON, sun_hour)
+    w_ms = (main or {}).get("wind", fallback_wind)
+    w_dir= (main or {}).get("wdir", fallback_wdir)
+    wind_term = _compute_wind_term(w_ms, w_dir)
+
+    T = (weights.get("frag",0.45)*frag_term
+         + weights.get("sector",0.35)*sector_term
+         + weights.get("wind",0.20)*wind_term)
+
+    has_window = T > threshold
+    if has_window:
+        # 折扣从阈值开始线性放大到 1.0 → k 在 [kmin,kmax] 内插
+        x = min(1.0, max(0.0, (T - threshold) / max(1e-6, 1.0 - threshold)))
+        k = kmin + (kmax - kmin) * x
+    else:
+        k = 1.0
+
+    sample_str = " | ".join(f"{int(r)}km:{(f'{v:.0f}%' if v is not None else 'NA')}" for r,v in zip(radii, lows))
+    reason = f"T={T:.2f} (frag={frag_term:.2f}, sector={sector_term:.2f}, wind={wind_term:.2f}); 折扣k={k:.2f}; 采样[{sample_str}]"
+    return T, has_window, k, reason, sample_str
 # ----------------- 主流程 -----------------
 def run_sunset():
     sun_exact, sun_hour = sunset_time()
@@ -258,7 +390,9 @@ def run_sunset():
         wind   = om["hourly"]["windspeed_10m"][idx],
         precip = om["hourly"]["precipitation"][idx]
     )
-
+    T, has_win, k, reason_tc, _ = compute_tianchuang_and_discount(sun_hour, event="sunset",
+                                                                  fallback_wind=vals["wind"], fallback_wdir=None)
+    vals["low"] = max(0.0, min(100.0, vals["low"] * k))
     cb = parse_cloud_base(metar("ZGSZ"))
     total, det = calc_score(vals, cb, CONFIG["scoring"])
 
