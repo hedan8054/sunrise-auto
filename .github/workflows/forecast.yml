@@ -27,16 +27,28 @@ jobs:
         id: pick
         shell: bash
         run: |
-          set -e
-          LATEST=$(ls -t out/forecast_*.txt 2>/dev/null | head -n 1 || true)
-          echo "latest=$LATEST" >> $GITHUB_OUTPUT
-          if [ -n "$LATEST" ]; then
-            echo "base=$(basename "$LATEST")" >> $GITHUB_OUTPUT
+          # 关闭 -e 避免无文件时退出；用 nullglob 避免字面量通配符
+          set +e
+          shopt -s nullglob
+      
+          files=(out/forecast_*.txt)
+          latest=""
+          if (( ${#files[@]} )); then
+            # 若有多个，取时间最新
+            latest=$(ls -t out/forecast_*.txt | head -n 1)
+            echo "latest=$latest" >> "$GITHUB_OUTPUT"
+            echo "base=$(basename "$latest")" >> "$GITHUB_OUTPUT"
           fi
+      
           YM=$(date +'%Y-%m')
-          [ -f logs/scores_${YM}.csv ] && echo "scores=logs/scores_${YM}.csv" >> $GITHUB_OUTPUT
-          [ -f logs/cloud_${YM}.csv ]  && echo "cloud=logs/cloud_${YM}.csv"  >> $GITHUB_OUTPUT
-          [ -f logs/calib_${YM}.csv ]  && echo "calib=logs/calib_${YM}.csv"  >> $GITHUB_OUTPUT
+          [ -f "logs/scores_${YM}.csv" ] && echo "scores=logs/scores_${YM}.csv" >> "$GITHUB_OUTPUT"
+          [ -f "logs/cloud_${YM}.csv"  ] && echo "cloud=logs/cloud_${YM}.csv"  >> "$GITHUB_OUTPUT"
+          [ -f "logs/calib_${YM}.csv"  ] && echo "calib=logs/calib_${YM}.csv"  >> "$GITHUB_OUTPUT"
+      
+          # 打印一下，方便排查
+          echo "Picked latest: $latest"
+          ls -al out || true
+          ls -al logs || true
 
       # 读取报告并转成单行 HTML（换行-><br/>，转义 <>&）
       - name: Prepare email body (HTML)
