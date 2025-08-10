@@ -343,7 +343,143 @@ def build_forecast_text(total, det, sun_t, extra):
     if extra.get("note"):
         lines.append("\n提示：" + extra["note"])
     return "\n".join(lines)
+# ---------- 新的输出层（粘贴到工具函数区） ----------
+def _scene_tags(lc, mh, cb, vis_km, wind, dp, rain, tianchuang=None, event_name="日出"):
+    tags = []
+    # 低云 & 天窗
+    if lc >= 65:
+        tags.append("低云墙可能")
+    elif lc >= 40:
+        tags.append("低云偏多")
+    else:
+        tags.append("地平线通透")
 
+    if tianchuang is not None:
+        if tianchuang >= 0.6:
+            tags.append("天窗概率高")
+        elif tianchuang >= 0.35:
+            tags.append("天窗概率中")
+        else:
+            tags.append("天窗概率低")
+
+    # 中高云舞台
+    if 35 <= mh <= 60:
+        tags.append("云接光舞台")
+    elif mh < 20:
+        tags.append("天空干净")
+    else:
+        tags.append("厚云盖顶")
+
+    # 云底
+    if cb is None or cb < 0:
+        pass
+    elif cb < 500:
+        tags.append("贴海低云")
+    elif cb < 1000:
+        tags.append("云棚可能")
+    else:
+        tags.append("高云底")
+
+    # 观感辅助
+    if vis_km >= 15:
+        tags.append("通透度好")
+    if 2 <= wind <= 5:
+        tags.append("海面微波反光")
+    if dp < 1:
+        tags.append("易起雾")
+    if rain >= 1:
+        tags.append("降雨风险")
+    return list(dict.fromkeys(tags))[:6]  # 去重、限长
+
+
+def render_story_block(event_name, sun_t, score5, tags, one_liner, tips):
+    lines = []
+    lines.append(f"【{event_name}直观判断】{score5:.1f}/5｜" + "、".join(tags))
+    lines.append(f"{event_name}：{sun_t:%m月%d日 %H:%M}")
+    if one_liner:
+        lines.append(one_liner)
+    if tips:
+        lines.append("小贴士：" + tips)
+    return "\n".join(lines)
+
+
+def render_data_block(place, lat, lon, total18, detail_rows, extras=None, event_name="日出", sun_t=None):
+    lines = []
+    lines.append(f"\n拍摄指数：{total18}/18")
+    lines.append(f"地点：{place}  (lat={lat:.5f}, lon={lon:.5f})")
+    if sun_t:
+        lines.append(f"{event_name}：{sun_t:%H:%M}")
+    for name, val, pts in detail_rows:
+        if isinstance(val, float):
+            lines.append(f"- {name}: {val:.1f} → {pts}分")
+        else:
+            lines.append(f"- {name}: {val} → {pts}分")
+    if extras and extras.get("notes"):
+        lines.append("\n备注：" + extras["notes"])
+    return "\n".join(lines)
+
+
+def compose_output(event_name, sun_t, score5, total18, det, vals, extra):
+    """
+    det: 你的 calc_score(...) 返回的 detail 列表
+    vals: 你用于评分的原始数值 dict（low/mid/high/vis/t/td/wind/precip）
+    extra: 你现在已有的扩展字典，可放 扇区低云均值/碎片度 等
+    """
+    # 取关键指标
+    lc   = vals.get("low", 0) or 0
+    mh   = max(vals.get("mid", 0) or 0, vals.get("high", 0) or 0)
+    visk = (vals.get("vis", 0) or 0) / 1000.0
+    wind = vals.get("wind", 0) or 0
+    dp   = (vals.get("t", 0) or 0) - (vals.get("td", 0) or 0)
+    rain = vals.get("precip", 0) or 0
+
+    # 云底从 det 里拿（没有则 None）
+    cb = None
+    for k, v, _ in det:
+        if k == "云底高度m":
+            cb = None if (isinstance(v, (int,float)) and v < 0) else v
+            break
+
+    # 一个很轻量的“天窗因子”（只靠你现有扩展字段，不引入新的数据依赖）
+    # 你如果已算过 fan_low_mean / fan_frag / shoreline_wind_bonus，就用它们；
+    # 没有就默认 None，逻辑自动忽略
+    frag = extra.get("fan_frag")  # 0~1
+    fan_low = extra.get("fan_low_mean")  # 0~100
+    wind_bonus = extra.get("shoreline_wind_bonus", 0.0)  # -0.2~+0.3 类似
+    tianchuang = None
+    if frag is not None and fan_low is not None:
+        # 低云越少、碎片度越高 → 越容易出缝
+        tianchuang = max(0.0, min(1.0, 0.6*frag + 0.4*(1 - fan_low/100.0) + wind_bonus))
+
+    # 场景标签 + 一句话
+    tags = _scene_tags(lc, mh, cb, visk, wind, dp, rain, tianchuang, event_name)
+    if lc < 30:
+        one = "地平线通透，太阳大概率“蹦”出；色彩取决于中高云是否接光。"
+    elif lc < 60:
+        one = "低云有量，但存在开缝机会；盯住太阳方位的亮缝，等穿缝瞬间。"
+    else:
+        one = "低云偏厚，首轮日光可能被挡，留意侧向或后程开窗。"
+
+    if mh >= 35 and mh <= 60 and visk >= 20:
+        one += " 中高云条件利于“云接光”，晚霞/晨霞层次感可期。"
+    if tianchuang is not None:
+        one += f"（天窗指示：{'高' if tianchuang>=0.6 else '中' if tianchuang>=0.35 else '低'}）"
+
+    tips = []
+    if 2 <= wind <= 5:
+        tips.append("海面有微波反光，试 1/125~1/250 固定水纹")
+    if dp < 1:
+        tips.append("露点差低，镜头易起雾，常擦拭")
+    if cb and cb < 600:
+        tips.append("云底贴海，低机位/反射水洼更出片")
+    tips = "；".join(tips)
+
+    story = render_story_block(event_name, sun_t, score5, tags, one, tips)
+    data  = render_data_block(
+        CONFIG["location"]["name"], LAT, LON, total18, det,
+        extras={"notes": extra.get("note")}, event_name=event_name, sun_t=sun_t
+    )
+    return story + "\n" + data
 def gen_scene_desc(score5, kv, sun_t):
     lc   = kv.get("低云%",      0) or 0
     mh   = kv.get("中/高云%",    0) or 0
@@ -499,143 +635,7 @@ def run_forecast():
     text = scene_txt + "\n\n" + build_forecast_text(total, det, sun_exact, extra={})
     print(text)
     save_report("forecast", text)
-# ---------- 新的输出层（粘贴到工具函数区） ----------
-def _scene_tags(lc, mh, cb, vis_km, wind, dp, rain, tianchuang=None, event_name="日出"):
-    tags = []
-    # 低云 & 天窗
-    if lc >= 65:
-        tags.append("低云墙可能")
-    elif lc >= 40:
-        tags.append("低云偏多")
-    else:
-        tags.append("地平线通透")
 
-    if tianchuang is not None:
-        if tianchuang >= 0.6:
-            tags.append("天窗概率高")
-        elif tianchuang >= 0.35:
-            tags.append("天窗概率中")
-        else:
-            tags.append("天窗概率低")
-
-    # 中高云舞台
-    if 35 <= mh <= 60:
-        tags.append("云接光舞台")
-    elif mh < 20:
-        tags.append("天空干净")
-    else:
-        tags.append("厚云盖顶")
-
-    # 云底
-    if cb is None or cb < 0:
-        pass
-    elif cb < 500:
-        tags.append("贴海低云")
-    elif cb < 1000:
-        tags.append("云棚可能")
-    else:
-        tags.append("高云底")
-
-    # 观感辅助
-    if vis_km >= 15:
-        tags.append("通透度好")
-    if 2 <= wind <= 5:
-        tags.append("海面微波反光")
-    if dp < 1:
-        tags.append("易起雾")
-    if rain >= 1:
-        tags.append("降雨风险")
-    return list(dict.fromkeys(tags))[:6]  # 去重、限长
-
-
-def render_story_block(event_name, sun_t, score5, tags, one_liner, tips):
-    lines = []
-    lines.append(f"【{event_name}直观判断】{score5:.1f}/5｜" + "、".join(tags))
-    lines.append(f"{event_name}：{sun_t:%m月%d日 %H:%M}")
-    if one_liner:
-        lines.append(one_liner)
-    if tips:
-        lines.append("小贴士：" + tips)
-    return "\n".join(lines)
-
-
-def render_data_block(place, lat, lon, total18, detail_rows, extras=None, event_name="日出", sun_t=None):
-    lines = []
-    lines.append(f"\n拍摄指数：{total18}/18")
-    lines.append(f"地点：{place}  (lat={lat:.5f}, lon={lon:.5f})")
-    if sun_t:
-        lines.append(f"{event_name}：{sun_t:%H:%M}")
-    for name, val, pts in detail_rows:
-        if isinstance(val, float):
-            lines.append(f"- {name}: {val:.1f} → {pts}分")
-        else:
-            lines.append(f"- {name}: {val} → {pts}分")
-    if extras and extras.get("notes"):
-        lines.append("\n备注：" + extras["notes"])
-    return "\n".join(lines)
-
-
-def compose_output(event_name, sun_t, score5, total18, det, vals, extra):
-    """
-    det: 你的 calc_score(...) 返回的 detail 列表
-    vals: 你用于评分的原始数值 dict（low/mid/high/vis/t/td/wind/precip）
-    extra: 你现在已有的扩展字典，可放 扇区低云均值/碎片度 等
-    """
-    # 取关键指标
-    lc   = vals.get("low", 0) or 0
-    mh   = max(vals.get("mid", 0) or 0, vals.get("high", 0) or 0)
-    visk = (vals.get("vis", 0) or 0) / 1000.0
-    wind = vals.get("wind", 0) or 0
-    dp   = (vals.get("t", 0) or 0) - (vals.get("td", 0) or 0)
-    rain = vals.get("precip", 0) or 0
-
-    # 云底从 det 里拿（没有则 None）
-    cb = None
-    for k, v, _ in det:
-        if k == "云底高度m":
-            cb = None if (isinstance(v, (int,float)) and v < 0) else v
-            break
-
-    # 一个很轻量的“天窗因子”（只靠你现有扩展字段，不引入新的数据依赖）
-    # 你如果已算过 fan_low_mean / fan_frag / shoreline_wind_bonus，就用它们；
-    # 没有就默认 None，逻辑自动忽略
-    frag = extra.get("fan_frag")  # 0~1
-    fan_low = extra.get("fan_low_mean")  # 0~100
-    wind_bonus = extra.get("shoreline_wind_bonus", 0.0)  # -0.2~+0.3 类似
-    tianchuang = None
-    if frag is not None and fan_low is not None:
-        # 低云越少、碎片度越高 → 越容易出缝
-        tianchuang = max(0.0, min(1.0, 0.6*frag + 0.4*(1 - fan_low/100.0) + wind_bonus))
-
-    # 场景标签 + 一句话
-    tags = _scene_tags(lc, mh, cb, visk, wind, dp, rain, tianchuang, event_name)
-    if lc < 30:
-        one = "地平线通透，太阳大概率“蹦”出；色彩取决于中高云是否接光。"
-    elif lc < 60:
-        one = "低云有量，但存在开缝机会；盯住太阳方位的亮缝，等穿缝瞬间。"
-    else:
-        one = "低云偏厚，首轮日光可能被挡，留意侧向或后程开窗。"
-
-    if mh >= 35 and mh <= 60 and visk >= 20:
-        one += " 中高云条件利于“云接光”，晚霞/晨霞层次感可期。"
-    if tianchuang is not None:
-        one += f"（天窗指示：{'高' if tianchuang>=0.6 else '中' if tianchuang>=0.35 else '低'}）"
-
-    tips = []
-    if 2 <= wind <= 5:
-        tips.append("海面有微波反光，试 1/125~1/250 固定水纹")
-    if dp < 1:
-        tips.append("露点差低，镜头易起雾，常擦拭")
-    if cb and cb < 600:
-        tips.append("云底贴海，低机位/反射水洼更出片")
-    tips = "；".join(tips)
-
-    story = render_story_block(event_name, sun_t, score5, tags, one, tips)
-    data  = render_data_block(
-        CONFIG["location"]["name"], LAT, LON, total18, det,
-        extras={"notes": extra.get("note")}, event_name=event_name, sun_t=sun_t
-    )
-    return story + "\n" + data
     # 日志
     log_csv(CONFIG["paths"]["log_scores"], {
         "time": now(), "mode": "forecast", "score": total, "score5": score5,
