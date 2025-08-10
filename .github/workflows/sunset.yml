@@ -22,32 +22,27 @@ jobs:
       - name: Run sunset forecast
         run: python sunset_bot.py
 
-      # —— 这里是关键修复：不用 ls+pipe，改为 bash 数组匹配 —— 
+      # —— 选最新的日落报告（无文件也不报错） ——
       - name: Pick latest report
         id: pick
         shell: bash
         run: |
           set +e
           shopt -s nullglob
-
-          files=(out/sunset_*.txt)
           latest=""
+          files=(out/sunset_*.txt)
           if (( ${#files[@]} )); then
             latest=$(ls -t out/sunset_*.txt | head -n 1)
             echo "latest=$latest" >> "$GITHUB_OUTPUT"
             echo "base=$(basename "$latest")" >> "$GITHUB_OUTPUT"
           fi
-
           YM=$(date +'%Y-%m')
           [ -f "logs/scores_${YM}.csv" ] && echo "scores=logs/scores_${YM}.csv" >> "$GITHUB_OUTPUT"
           [ -f "logs/cloud_${YM}.csv"  ] && echo "cloud=logs/cloud_${YM}.csv"  >> "$GITHUB_OUTPUT"
           [ -f "logs/calib_${YM}.csv"  ] && echo "calib=logs/calib_${YM}.csv"  >> "$GITHUB_OUTPUT"
+          echo "Picked latest=$latest" ; ls -al out || true ; ls -al logs || true
 
-          echo "Picked latest: $latest"
-          ls -al out  || true
-          ls -al logs || true
-
-      # 和日出一致：把正文转成 HTML，再发邮件
+      # —— 把正文转成 HTML（转义+换行 <br/>） ——
       - name: Prepare email body (HTML)
         id: body
         if: ${{ steps.pick.outputs.latest != '' }}
@@ -58,7 +53,7 @@ jobs:
           HTML=$(python - <<'PY' "$FILE"
 import sys, html
 txt = open(sys.argv[1], 'r', encoding='utf-8').read()
-print(html.escape(txt).replace('\n', '<br/>'))
+print(html.escape(txt).replace('\n','<br/>'))
 PY
 )
           echo "html=${HTML}" >> "$GITHUB_OUTPUT"
