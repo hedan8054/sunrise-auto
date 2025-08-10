@@ -30,3 +30,15 @@ paths:
   log_scores: "logs/scores_%Y-%m.csv"
   log_cloud:  "logs/cloud_%Y-%m.csv"
   log_calib:  "logs/calib_%Y-%m.csv"   # 新增：记录每次校准结果
+scene_tweaks:
+  sector_half_angle_deg: 35         # 扇区半角（看太阳方位 ±35°）
+  sector_radii_km: [20, 50, 80, 120]# 用你的 samples 半径
+  coast_azimuth_deg: 110            # 海岸线法向（面朝海的方向）；杨梅坑可先填 110
+  horizon_elev_deg: 0.3             # 有效地平线仰角（小岛/海平面），先给 0.3° 经验值
+  wind_ok_range_ms: [2.0, 8.0]      # 风速有利范围
+  weights:                          # 天窗因子权重
+    frag: 0.45                      # 碎片度权重
+    sector: 0.35                    # 扇区低云的“低值/均值”权重
+    wind: 0.20                      # 风向修正权重
+  tianchuang_threshold: 0.55        # 天窗因子阈值（>阈值算“有缝”）
+  occlusion_discount_range: [0.6, 0.85] # 有缝时对低云遮挡项打折的系数区间
