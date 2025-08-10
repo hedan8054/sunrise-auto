@@ -1,0 +1,349 @@
+# 场景标签库（按优先级从高到低）；单位：
+# low/mid/high: %，cloud_base_m: m，vis_km: km，wind: m/s，precip: mm/h，dp: 露点差℃
+# 条件语法：AND 内所有条件满足；ANY 任一满足；NOT 取反；支持范围: [min,max] 或比较: ">=x","<x"
+# score: 该标签的权重（用于排序）；min_duration_h: 至少满足多少小时（通常=1）
+version: 1
+labels:
+  - key: 破口穿日
+    score: 95
+    min_duration_h: 1
+    AND:
+      - ANY:
+          - {low: [30,70]}
+          - {mid: [20,70]}
+      - {precip: "<1"}
+      - {cloud_base_m: ">=600"}
+
+  - key: 低云墙挡日
+    score: 93
+    min_duration_h: 1
+    AND:
+      - {low: ">=70"}
+      - ANY:
+          - {cloud_base_m: "<600"}
+          - {vis_km: "<8"}
+
+  - key: 厚云压顶
+    score: 90
+    min_duration_h: 1
+    AND:
+      - ANY:
+          - {mid: ">=80"}
+          - {high: ">=80"}
+      - {precip: "<1"}
+
+  - key: 二次燃
+    score: 88
+    min_duration_h: 1
+    AND:
+      - ANY:
+          - {mid: [25,70]}
+          - {high: [25,70]}
+      - {low: "<40"}
+      - {precip: "<0.5"}
+
+  - key: 日柱
+    score: 86
+    min_duration_h: 1
+    AND:
+      - {low: "<20"}
+      - ANY:
+          - {dp: "<1"}
+          - {vis_km: ">=15"}
+
+  - key: 耶稣光（云隙光）
+    score: 85
+    min_duration_h: 1
+    AND:
+      - {low: [20,70]}
+      - ANY:
+          - {mid: [20,80]}
+          - {high: [10,70]}
+      - {precip: "<0.5"}
+
+  - key: 太阳镶边（Edge Glow）
+    score: 84
+    min_duration_h: 1
+    AND:
+      - ANY:
+          - {low: [30,70]}
+          - {mid: [20,70]}
+      - {cloud_base_m: ">=500"}
+
+  - key: 纯净通透
+    score: 83
+    min_duration_h: 1
+    AND:
+      - {low: "<20"}
+      - {mid: "<20"}
+      - {high: "<20"}
+      - {vis_km: ">=20"}
+
+  - key: 高积云燃烧带
+    score: 82
+    min_duration_h: 1
+    AND:
+      - {mid: [20,70]}
+      - {precip: "<0.5"}
+
+  - key: 卷云金羽
+    score: 80
+    min_duration_h: 1
+    AND:
+      - {high: [20,70]}
+      - {low: "<40"}
+      - {precip: "<0.5"}
+
+  - key: 多层云叠色
+    score: 79
+    min_duration_h: 1
+    AND:
+      - {low: [10,60]}
+      - {mid: [10,70]}
+      - {high: [10,80]}
+
+  - key: 云街晨光/晚霞
+    score: 78
+    min_duration_h: 1
+    AND:
+      - {low: [20,60]}
+      - {wind: [2,6]}
+
+  - key: 低云镶边
+    score: 77
+    min_duration_h: 1
+    AND:
+      - {low: [30,70]}
+      - {cloud_base_m: [500,1200]}
+
+  - key: 雾缝穿日
+    score: 76
+    min_duration_h: 1
+    AND:
+      - ANY:
+          - {vis_km: "<6"}
+          - {dp: "<1"}
+      - {low: [10,60]}
+
+  - key: 雾墙挡日
+    score: 75
+    min_duration_h: 1
+    AND:
+      - ANY:
+          - {vis_km: "<3"}
+          - {dp: "<0.5"}
+      - {low: ">=50"}
+
+  - key: 波状云彩
+    score: 74
+    min_duration_h: 1
+    AND:
+      - ANY:
+          - {mid: [20,80]}
+          - {high: [20,80]}
+      - {wind: [2,10]}
+
+  - key: 卷层云金幕
+    score: 73
+    min_duration_h: 1
+    AND:
+      - {high: [30,90]}
+      - {precip: "<0.5"}
+
+  - key: 反霞
+    score: 72
+    min_duration_h: 1
+    AND:
+      - ANY:
+          - {mid: [20,80]}
+          - {high: [20,80]}
+      - {low: "<40"}
+
+  - key: 鱼鳞云染色
+    score: 71
+    min_duration_h: 1
+    AND:
+      - {mid: [30,70]}
+      - {precip: "<0.5"}
+
+  - key: 透云射日
+    score: 70
+    min_duration_h: 1
+    AND:
+      - {low: [20,60]}
+      - ANY:
+          - {mid: [20,80]}
+          - {high: [10,80]}
+
+  - key: 厚云但透光
+    score: 69
+    min_duration_h: 1
+    AND:
+      - {low: [40,90]}
+      - {mid: "<60"}
+      - {precip: "<1"}
+
+  - key: 海面金道
+    score: 68
+    min_duration_h: 1
+    AND:
+      - {wind: [1,7]}
+      - {vis_km: ">=10"}
+
+  - key: 镜面倒影（湖/滩涂）
+    score: 67
+    min_duration_h: 1
+    AND:
+      - {wind: "<2"}
+      - {precip: "<0.2"}
+
+  - key: 雨幡霞光
+    score: 66
+    min_duration_h: 1
+    AND:
+      - {precip: [0.1,2]}
+      - ANY:
+          - {mid: [20,80]}
+          - {high: [20,80]}
+
+  - key: 砧状云余辉（偏日落）
+    score: 65
+    min_duration_h: 1
+    AND:
+      - {mid: ">=60"}
+      - {precip: "<1"}
+
+  - key: 海风云墙（偏日落）
+    score: 64
+    min_duration_h: 1
+    AND:
+      - {low: [40,80]}
+      - {wind: [3,9]}
+      - {precip: "<0.5"}
+
+  - key: 后燃
+    score: 63
+    min_duration_h: 1
+    AND:
+      - {low: "<40"}
+      - ANY:
+          - {mid: [20,80]}
+          - {high: [20,80]}
+      - {precip: "<0.5"}
+
+  - key: 天际碎云
+    score: 62
+    min_duration_h: 1
+    AND:
+      - {low: [10,40]}
+      - {mid: "<60"}
+
+  - key: 城市剪影
+    score: 61
+    min_duration_h: 1
+    AND:
+      - {vis_km: ">=8"}
+
+  - key: 山峰剪影
+    score: 61
+    min_duration_h: 1
+    AND:
+      - {vis_km: ">=8"}
+
+  - key: 渔船剪影
+    score: 60
+    min_duration_h: 1
+    AND:
+      - {vis_km: ">=6"}
+
+  - key: 人影剪影
+    score: 60
+    min_duration_h: 1
+    AND:
+      - {vis_km: ">=6"}
+
+  - key: 飞鸟掠日
+    score: 58
+    min_duration_h: 1
+    AND:
+      - {vis_km: ">=8"}
+
+  - key: 风车剪影
+    score: 58
+    min_duration_h: 1
+    AND:
+      - {vis_km: ">=8"}
+
+  - key: 海浪穿日
+    score: 57
+    min_duration_h: 1
+    AND:
+      - {wind: ">=6"}
+      - {vis_km: ">=8"}
+
+  - key: 浪尖钻石光
+    score: 56
+    min_duration_h: 1
+    AND:
+      - {wind: [3,9]}
+      - {vis_km: ">=10"}
+
+  - key: 潮间带映光
+    score: 56
+    min_duration_h: 1
+    AND:
+      - {vis_km: ">=6"}
+
+  - key: 湿地/水洼映光
+    score: 55
+    min_duration_h: 1
+    AND:
+      - {vis_km: ">=6"}
+
+  - key: 云隙彩虹
+    score: 54
+    min_duration_h: 1
+    AND:
+      - {precip: [0.1,2]}
+      - {vis_km: ">=8"}
+
+  - key: 平流雾顶光（偏日出）
+    score: 53
+    min_duration_h: 1
+    AND:
+      - ANY:
+          - {dp: "<1"}
+          - {vis_km: "<6"}
+      - {low: [10,50]}
+
+  - key: 低层雾毯光带（偏日出）
+    score: 52
+    min_duration_h: 1
+    AND:
+      - {dp: "<1.5"}
+      - {vis_km: "<8"}
+      - {low: [10,50]}
+
+  - key: 厚云+毛毛雨
+    score: 50
+    min_duration_h: 1
+    AND:
+      - {precip: [0.2,2]}
+      - ANY:
+          - {mid: ">=70"}
+          - {low: ">=60"}
+
+  - key: 大雨遮日
+    score: 48
+    min_duration_h: 1
+    AND:
+      - {precip: ">=2"}
+
+  - key: 长曝光云拖影
+    score: 45
+    min_duration_h: 1
+    AND:
+      - {wind: [5,12]}
+      - ANY:
+          - {mid: [20,80]}
+          - {high: [20,80]}
