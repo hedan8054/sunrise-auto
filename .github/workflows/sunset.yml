@@ -50,14 +50,8 @@ jobs:
         run: |
           set -e
           FILE="${{ steps.pick.outputs.latest }}"
-          HTML=$(python -c "import sys,html; txt=open(sys.argv[1],'r',encoding='utf-8').read(); print(html.escape(txt).replace('\n','<br/>'))" "$FILE")
+          HTML=$(python -c "import sys,html; print(html.escape(open(sys.argv[1],encoding='utf-8').read()).replace('\n','<br/>'))" "$FILE")
           echo "html=$HTML" >> "$GITHUB_OUTPUT"
-import sys, html
-txt = open(sys.argv[1], 'r', encoding='utf-8').read()
-print(html.escape(txt).replace('\n','<br/>'))
-PY
-)
-          echo "html=${HTML}" >> "$GITHUB_OUTPUT"
 
       - name: Send email (sunset)
         if: ${{ steps.pick.outputs.latest != '' }}
