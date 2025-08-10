@@ -405,6 +405,7 @@ def run_sunset():
     scene_txt = (
         gen_scene_desc(score5, kv, sun_exact, event_name="日落")
         + f"\n- 低云墙风险（模型）：{risk_text}"
+        + f"\n- 天窗因子：{reason_tc}"
     )
 
     # 新增：场景标签 + 画面感文案
