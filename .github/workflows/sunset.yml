@@ -2,7 +2,7 @@ name: Sunset Forecast
 
 on:
   schedule:
-    # 每天北京时间 05:30 运行（UTC 前一天 21:30）
+    # 每天北京时间 05:30 运行（UTC 21:30 前一天）
     - cron: '30 21 * * *'
   workflow_dispatch:
 
@@ -22,23 +22,32 @@ jobs:
       - name: Run sunset forecast
         run: python sunset_bot.py
 
-      # 选出最新日落报告和当月日志，供邮件附件使用
+      # —— 这里是关键修复：不用 ls+pipe，改为 bash 数组匹配 —— 
       - name: Pick latest report
         id: pick
         shell: bash
         run: |
-          set -e
-          LATEST=$(ls -t out/sunset_*.txt 2>/dev/null | head -n 1 || true)
-          echo "latest=$LATEST" >> $GITHUB_OUTPUT
-          if [ -n "$LATEST" ]; then
-            echo "base=$(basename "$LATEST")" >> $GITHUB_OUTPUT
-          fi
-          YM=$(date +'%Y-%m')
-          [ -f logs/scores_${YM}.csv ] && echo "scores=logs/scores_${YM}.csv" >> $GITHUB_OUTPUT
-          [ -f logs/cloud_${YM}.csv ]  && echo "cloud=logs/cloud_${YM}.csv"  >> $GITHUB_OUTPUT
-          [ -f logs/calib_${YM}.csv ]  && echo "calib=logs/calib_${YM}.csv"  >> $GITHUB_OUTPUT
+          set +e
+          shopt -s nullglob
 
-      # 读取报告并转成单行 HTML（换行-><br/>，转义 <>&）
+          files=(out/sunset_*.txt)
+          latest=""
+          if (( ${#files[@]} )); then
+            latest=$(ls -t out/sunset_*.txt | head -n 1)
+            echo "latest=$latest" >> "$GITHUB_OUTPUT"
+            echo "base=$(basename "$latest")" >> "$GITHUB_OUTPUT"
+          fi
+
+          YM=$(date +'%Y-%m')
+          [ -f "logs/scores_${YM}.csv" ] && echo "scores=logs/scores_${YM}.csv" >> "$GITHUB_OUTPUT"
+          [ -f "logs/cloud_${YM}.csv"  ] && echo "cloud=logs/cloud_${YM}.csv"  >> "$GITHUB_OUTPUT"
+          [ -f "logs/calib_${YM}.csv"  ] && echo "calib=logs/calib_${YM}.csv"  >> "$GITHUB_OUTPUT"
+
+          echo "Picked latest: $latest"
+          ls -al out  || true
+          ls -al logs || true
+
+      # 和日出一致：把正文转成 HTML，再发邮件
       - name: Prepare email body (HTML)
         id: body
         if: ${{ steps.pick.outputs.latest != '' }}
@@ -46,7 +55,12 @@ jobs:
         run: |
           set -e
           FILE="${{ steps.pick.outputs.latest }}"
-          HTML=$(python -c "import html,sys; t=open(r'$FILE','r',encoding='utf-8').read(); print(html.escape(t).replace('\n','<br/>'))")
+          HTML=$(python - <<'PY' "$FILE"
+import sys, html
+txt = open(sys.argv[1], 'r', encoding='utf-8').read()
+print(html.escape(txt).replace('\n', '<br/>'))
+PY
+)
           echo "html=${HTML}" >> "$GITHUB_OUTPUT"
 
       - name: Send email (sunset)
@@ -69,9 +83,9 @@ jobs:
             ${{ steps.pick.outputs.cloud }}
             ${{ steps.pick.outputs.calib }}
 
-      # 失败兜底：没产生日报或流程失败，发告警
+      # 失败兜底
       - name: Send failure email
-        if: ${{ failure() || steps.pick.outputs.latest == '' }}
+        if: failure() || ${{ steps.pick.outputs.latest == '' }}
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.qq.com
